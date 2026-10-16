@@ -1,13 +1,12 @@
-import { WebSocket } from 'ws';
+// The race room. Runs in the browser of whoever created the room (the host).
+// Every player, including the host itself, is a { send } endpoint; the room never touches the network directly.
+
 import {
-  LAPS, CHECKPOINTS, MAX_PLAYERS, COUNTDOWN_MS, RESULTS_MS, FINISH_GRACE_MS, HORNS,
-} from '../shared/config.js';
+  CHECKPOINTS, MAX_PLAYERS, COUNTDOWN_MS, RESULTS_MS, FINISH_GRACE_MS, IDLE_KICK_MS, HORNS, ACTIONS,
+} from './config.js';
+import { sanitizeLook } from './tuning.js';
 
-const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-const PALETTE = ['#ff3b30', '#ffcc00', '#34c759', '#0a84ff', '#ff2d95', '#af52de', '#ff9500', '#5ac8fa'];
 const FALLBACK_NAMES = ['Anonymous Hamster', 'Nameless Nugget', 'Mystery Minivan', 'Some Guy In A Car'];
-
-let nextPlayerId = 1;
 
 const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 const isNum = (v, limit) => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= limit;
@@ -18,93 +17,50 @@ function cleanName(raw) {
   return name || pick(FALLBACK_NAMES);
 }
 
-function cleanCode(raw) {
-  return String(raw ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
-}
-
-function send(ws, msg) {
-  if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg));
-}
-
-export class RoomManager {
-  constructor() {
-    this.rooms = new Map();
-  }
-
-  join(ws, msg) {
-    let code = cleanCode(msg.room);
-    if (!code) code = this.freshCode();
-
-    let room = this.rooms.get(code);
-    if (!room) {
-      room = new Room(code);
-      this.rooms.set(code, room);
-    }
-    if (room.players.size >= MAX_PLAYERS) {
-      send(ws, { t: 'error', msg: `Room ${code} is full. Even the clown car has limits.` });
-      return null;
-    }
-    const player = room.add(ws, msg);
-    return { room, player };
-  }
-
-  leave(room, player) {
-    room.remove(player.id);
-    if (room.players.size === 0) this.rooms.delete(room.code);
-  }
-
-  freshCode() {
-    for (;;) {
-      let code = '';
-      for (let i = 0; i < 4; i++) code += pick(CODE_CHARS);
-      if (!this.rooms.has(code)) return code;
-    }
-  }
-
-  tick(now) {
-    for (const room of this.rooms.values()) room.tick(now);
-  }
-}
-
-class Room {
+export class Room {
   constructor(code) {
     this.code = code;
     this.players = new Map();
+    this.nextId = 1;
     this.phase = 'lobby'; // lobby -> countdown -> racing -> results -> lobby
     this.phaseEndsAt = 0;
     this.raceStart = 0;
     this.finishCount = 0;
   }
 
-  add(ws, msg) {
-    const id = nextPlayerId++;
-    const used = new Set([...this.players.values()].map((p) => p.color));
-    const wanted = typeof msg.color === 'string' && /^#[0-9a-f]{6}$/i.test(msg.color) ? msg.color.toLowerCase() : null;
-    const color = wanted && !used.has(wanted) ? wanted : (PALETTE.find((c) => !used.has(c)) ?? '#ffffff');
+  // Returns the player, or null if the room is full.
+  add(send, msg, { local = false } = {}) {
+    if (this.players.size >= MAX_PLAYERS) {
+      send({ t: 'error', msg: `Room ${this.code} is full. Even the clown car has limits.` });
+      return null;
+    }
+    const id = this.nextId++;
+    const used = new Set([...this.players.values()].map((p) => p.slot));
+    let slot = 0;
+    while (used.has(slot)) slot++;
 
     const player = {
       id,
-      ws,
+      send,
+      local,
       name: cleanName(msg.name),
-      color,
+      look: sanitizeLook(msg.look),
       horn: HORNS[id % HORNS.length],
-      slot: this.players.size,
+      slot,
       ready: false,
       inRace: false,
-      lap: 0,
       nextCp: 0,
-      cpCount: 0,
       finished: false,
       time: null,
       place: null,
       state: null,
+      lastSeen: Date.now(),
+      lastAct: {},
       lastHonk: 0,
     };
     this.players.set(id, player);
 
-    send(ws, {
-      t: 'welcome', id, room: this.code, name: player.name, color, horn: player.horn, slot: player.slot,
-    });
+    send({ t: 'welcome', id, room: this.code, name: player.name, horn: player.horn, slot });
     this.broadcast({ t: 'event', kind: 'join', id, name: player.name }, id);
     this.sendRoom();
     return player;
@@ -119,6 +75,10 @@ class Room {
   }
 
   handle(player, msg) {
+    if (!this.players.has(player.id)) return;
+    const now = Date.now();
+    player.lastSeen = now;
+
     switch (msg.t) {
       case 'ready':
         if (this.phase !== 'lobby') return;
@@ -126,10 +86,16 @@ class Room {
         this.sendRoom();
         break;
 
+      case 'look':
+        if (this.phase === 'countdown' || this.phase === 'racing') return;
+        player.look = sanitizeLook(msg.look);
+        this.sendRoom();
+        break;
+
       case 's': {
         const { x, z, h, v, s, f, i } = msg;
         if (!isNum(x, 5000) || !isNum(z, 5000) || !isNum(h, 100) || !isNum(v, 200) || !isNum(s, 2)) return;
-        if (!Number.isInteger(f) || f < 0 || f > 15 || !Number.isInteger(i) || i < 0 || i > 100000) return;
+        if (!Number.isInteger(f) || f < 0 || f > 255 || !Number.isInteger(i) || i < 0 || i > 100000) return;
         player.state = {
           x: round(x, 100), z: round(z, 100), h: round(h, 1000), v: round(v, 10), s: round(s, 100), f, i,
         };
@@ -140,11 +106,20 @@ class Room {
         this.checkpoint(player, msg.i);
         break;
 
-      case 'honk': {
-        const now = Date.now();
+      case 'honk':
         if (now - player.lastHonk < 400) return;
         player.lastHonk = now;
         this.broadcast({ t: 'honk', id: player.id }, player.id);
+        break;
+
+      case 'act': {
+        const action = ACTIONS[msg.k];
+        if (!action) return;
+        // A second of slack for clocks and latency; the client enforces the real cooldown.
+        if (now - (player.lastAct[msg.k] ?? 0) < action.cooldown - 1000) return;
+        player.lastAct[msg.k] = now;
+        const target = Number.isInteger(msg.target) && this.players.has(msg.target) ? msg.target : null;
+        this.broadcast({ t: 'act', id: player.id, k: msg.k, target }, player.id);
         break;
       }
 
@@ -153,18 +128,11 @@ class Room {
     }
   }
 
-  // Checkpoints must be hit in order; crossing checkpoint 0 (the start line) advances the lap.
+  // Checkpoints must be hit in order; the last one is the finish line.
   checkpoint(player, i) {
     if (this.phase !== 'racing' || !player.inRace || player.finished || i !== player.nextCp) return;
-    player.nextCp = (i + 1) % CHECKPOINTS;
-    player.cpCount++;
-    if (i !== 0) return;
-
-    if (player.lap < LAPS) {
-      player.lap++;
-      this.sendRoom();
-      return;
-    }
+    player.nextCp++;
+    if (player.nextCp < CHECKPOINTS) return;
 
     const now = Date.now();
     player.finished = true;
@@ -185,7 +153,7 @@ class Room {
     let slot = 0;
     for (const p of this.players.values()) {
       Object.assign(p, {
-        inRace: true, lap: 0, nextCp: 0, cpCount: 0, finished: false, time: null, place: null,
+        inRace: true, nextCp: 0, finished: false, time: null, place: null,
       });
       grid[p.id] = slot++;
     }
@@ -203,11 +171,19 @@ class Room {
   }
 
   tick(now) {
-    const racers = [...this.players.values()].filter((p) => p.inRace);
+    for (const p of [...this.players.values()]) {
+      if (!p.local && now - p.lastSeen > IDLE_KICK_MS) {
+        this.remove(p.id);
+        p.onKick?.();
+      }
+    }
+
+    const all = [...this.players.values()];
+    const racers = all.filter((p) => p.inRace);
 
     switch (this.phase) {
       case 'lobby':
-        if (this.players.size > 0 && [...this.players.values()].every((p) => p.ready)) this.startCountdown(now);
+        if (all.length > 0 && all.every((p) => p.ready)) this.startCountdown(now);
         break;
       case 'countdown':
         if (racers.length === 0) {
@@ -237,9 +213,9 @@ class Room {
     }
 
     const snap = [];
-    for (const p of this.players.values()) {
+    for (const p of all) {
       const s = p.state;
-      if (s) snap.push([p.id, s.x, s.z, s.h, s.v, s.s, s.f, p.cpCount, s.i]);
+      if (s) snap.push([p.id, s.x, s.z, s.h, s.v, s.s, s.f, s.i]);
     }
     if (snap.length) this.broadcast({ t: 'snap', p: snap });
   }
@@ -250,15 +226,14 @@ class Room {
       code: this.code,
       phase: this.phase,
       phaseMs: Math.max(0, this.phaseEndsAt - Date.now()),
-      laps: LAPS,
       players: [...this.players.values()].map((p) => ({
         id: p.id,
         name: p.name,
-        color: p.color,
+        look: p.look,
         horn: p.horn,
+        slot: p.slot,
         ready: p.ready,
         inRace: p.inRace,
-        lap: p.lap,
         finished: p.finished,
         time: p.time,
         place: p.place,
@@ -268,11 +243,8 @@ class Room {
   }
 
   broadcast(msg, exceptId = null) {
-    const data = JSON.stringify(msg);
     for (const p of this.players.values()) {
-      if (p.id === exceptId) continue;
-      // Skip clients whose socket is backed up rather than buffering forever.
-      if (p.ws.readyState === WebSocket.OPEN && p.ws.bufferedAmount < 256 * 1024) p.ws.send(data);
+      if (p.id !== exceptId) p.send(msg);
     }
   }
 }

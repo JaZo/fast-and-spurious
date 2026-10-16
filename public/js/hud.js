@@ -1,70 +1,94 @@
-import { DRIVER_NAMES, pick, ordinal, formatTime, finishQuip } from './fun.js';
+import {
+  DRIVER_NAMES, pick, ordinal, formatTime, finishQuip,
+} from './fun.js';
 import { SAMPLES } from './track.js';
 
-const COLORS = ['#ff3b30', '#ffcc00', '#34c759', '#0a84ff', '#ff2d95', '#af52de', '#ff9500', '#5ac8fa'];
 const $ = (id) => document.getElementById(id);
 
-const storage = {
-  get(key) {
-    try { return localStorage.getItem(key); } catch { return null; }
+export const storage = {
+  get(key, fallback = null) {
+    try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
   },
   set(key, value) {
     try { localStorage.setItem(key, value); } catch { /* private mode */ }
   },
 };
 
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;
+  return node;
+}
+
 export class Hud {
   constructor(track) {
     this.track = track;
-    this.color = storage.get('fs.color') ?? pick(COLORS);
     this.lastText = {};
-    this.prepareMinimap();
+    this.tacho = $('tacho').getContext('2d');
+    this.map = $('minimap').getContext('2d');
   }
 
   // ---------- menu ----------
 
-  bindMenu(onPlay) {
+  bindMenu({ onCreate, onJoin, onGarage, onMusicVolume, onQuality }) {
     const name = $('name');
     const room = $('room');
     name.value = storage.get('fs.name') ?? pick(DRIVER_NAMES);
     room.value = new URLSearchParams(location.search).get('room') ?? '';
     $('dice').onclick = () => { name.value = pick(DRIVER_NAMES); };
 
-    const swatches = $('swatches');
-    for (const c of COLORS) {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.className = 'swatch';
-      b.style.background = c;
-      b.dataset.color = c;
-      b.onclick = () => {
-        this.color = c;
-        for (const s of swatches.children) s.classList.toggle('selected', s.dataset.color === c);
-      };
-      swatches.append(b);
-    }
-    swatches.querySelector(`[data-color="${this.color}"]`)?.classList.add('selected');
-
-    const go = () => {
+    const details = () => {
       storage.set('fs.name', name.value.trim());
-      storage.set('fs.color', this.color);
-      $('play').disabled = true;
-      onPlay({ name: name.value.trim(), room: room.value.trim().toUpperCase(), color: this.color });
+      return { name: name.value.trim(), room: room.value.trim().toUpperCase() };
     };
-    $('play').onclick = go;
-    for (const input of [name, room]) {
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') go(); });
-    }
-    name.focus();
+    const syncJoin = () => { $('join').disabled = room.value.trim().length < 4; };
+    room.addEventListener('input', syncJoin);
+    syncJoin();
+
+    $('create').onclick = () => onCreate(details());
+    $('join').onclick = () => onJoin(details());
+    $('menu-garage').onclick = () => onGarage();
+    room.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !$('join').disabled) onJoin(details()); });
+    name.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter') return;
+      if (room.value.trim().length >= 4) onJoin(details());
+      else onCreate(details());
+    });
+
+    const vol = $('music-volume');
+    vol.value = storage.get('fs.musicVolume', '0.6');
+    vol.oninput = () => onMusicVolume(Number(vol.value));
+    const quality = $('quality');
+    quality.value = storage.get('fs.quality', 'high');
+    quality.onchange = () => {
+      storage.set('fs.quality', quality.value);
+      onQuality(quality.value);
+    };
+    if (room.value) room.focus();
+    else name.focus();
+  }
+
+  menuBusy(text) {
+    for (const id of ['create', 'join', 'menu-garage']) $(id).disabled = !!text;
+    if (!text) $('join').disabled = $('room').value.trim().length < 4;
+    const status = $('menu-status');
+    status.hidden = !text;
+    status.textContent = text ?? '';
+    $('menu-error').hidden = true;
   }
 
   menuError(msg) {
+    this.menuBusy(null);
     $('menu').hidden = false;
     $('hud').hidden = true;
-    $('play').disabled = false;
-    const el = $('menu-error');
-    el.textContent = msg;
-    el.hidden = false;
+    const err = $('menu-error');
+    err.textContent = msg;
+    err.hidden = false;
+  }
+
+  showMenu(show) {
+    $('menu').hidden = !show;
   }
 
   showGame() {
@@ -72,20 +96,25 @@ export class Hud {
     $('hud').hidden = false;
   }
 
-  showDisconnected() {
+  showDisconnected(text) {
+    $('disconnected-text').textContent = text;
     $('disconnected').hidden = false;
   }
 
   // ---------- lobby ----------
 
-  bindLobby(onReady) {
+  bindLobby({ onReady, onGarage }) {
     $('ready').onclick = (e) => {
       onReady();
       e.currentTarget.blur(); // so Space doesn't re-click it while drifting
     };
+    $('lobby-garage').onclick = (e) => {
+      onGarage();
+      e.currentTarget.blur();
+    };
     $('copy-link').onclick = async (e) => {
       const btn = e.currentTarget;
-      const url = `${location.origin}/?room=${encodeURIComponent($('room-code').textContent)}`;
+      const url = `${location.origin}${location.pathname}?room=${encodeURIComponent($('room-code').textContent)}`;
       try {
         await navigator.clipboard.writeText(url);
         btn.textContent = 'Copied!';
@@ -97,24 +126,17 @@ export class Hud {
     };
   }
 
-  updateRoom(room, myId) {
+  updateRoom(room, myId, isHost) {
     $('room-code').textContent = room.code;
+    $('host-badge').hidden = !isHost;
     $('lobby').hidden = room.phase !== 'lobby';
 
-    const list = $('player-list');
-    list.replaceChildren(...room.players.map((p) => {
-      const li = document.createElement('li');
-      if (p.id === myId) li.className = 'me';
-      const dot = document.createElement('span');
-      dot.className = 'dot';
-      dot.style.background = p.color;
-      const name = document.createElement('span');
-      name.className = 'name';
-      name.textContent = p.name;
-      const status = document.createElement('span');
-      status.className = `status${p.ready ? ' ready' : ''}`;
-      status.textContent = p.ready ? '✔ READY' : 'revving…';
-      li.append(dot, name, status);
+    $('player-list').replaceChildren(...room.players.map((p) => {
+      const li = el('li', p.id === myId ? 'me' : '');
+      const dot = el('span', 'dot');
+      dot.style.background = p.look.color;
+      const status = el('span', `status${p.ready ? ' ready' : ''}`, p.ready ? '✔ READY' : 'revving…');
+      li.append(dot, el('span', 'name', p.name), status);
       return li;
     }));
 
@@ -134,64 +156,189 @@ export class Hud {
 
   setRace(info) {
     $('race-info').hidden = !info;
+    $('progress').hidden = !info;
     if (!info) return;
     this.setText('pos', String(info.position));
     this.setText('pos-suffix', ordinal(info.position));
     this.setText('pos-total', `/${info.total}`);
-    this.setText('lap', `${info.lap}/${info.laps}`);
     this.setText('timer', formatTime(info.timeMs));
+    this.setText('to-go', info.toGo > 0 ? `${(info.toGo / 1000).toFixed(2)} km to go` : 'FINISHED');
+
+    const bar = $('progress-markers');
+    while (bar.children.length < info.markers.length) bar.append(el('div', 'marker'));
+    while (bar.children.length > info.markers.length) bar.lastChild.remove();
+    info.markers.forEach((m, k) => {
+      const node = bar.children[k];
+      node.style.left = `${(m.frac * 100).toFixed(2)}%`;
+      node.style.background = m.color;
+      node.classList.toggle('me', !!m.me);
+    });
   }
 
-  setSpeed(kmh, nitro, nitroOn) {
-    this.setText('speed', String(Math.round(kmh)));
-    const fill = $('nitro-fill');
-    fill.style.width = `${Math.round(nitro * 100)}%`;
-    fill.classList.toggle('on', nitroOn);
+  drawTacho({ rpm, gear, kmh, nitro, nitroOn }) {
+    const ctx = this.tacho;
+    const S = ctx.canvas.width;
+    const c = S / 2;
+    const R = S * 0.44;
+    const a0 = Math.PI * 0.75;
+    const sweep = Math.PI * 1.5;
+    ctx.clearRect(0, 0, S, S);
+
+    ctx.beginPath();
+    ctx.arc(c, c, R + 8, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(6,8,16,0.78)';
+    ctx.fill();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(56,242,255,0.35)';
+    ctx.stroke();
+
+    // Redline.
+    ctx.beginPath();
+    ctx.arc(c, c, R - 6, a0 + sweep * 0.8, a0 + sweep);
+    ctx.lineWidth = 8;
+    ctx.strokeStyle = '#ff2a3a';
+    ctx.stroke();
+
+    // Ticks and numbers (x1000 rpm).
+    ctx.fillStyle = '#cfe9ff';
+    ctx.font = `600 ${S * 0.07}px Inter, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let k = 0; k <= 18; k++) {
+      const a = a0 + (k / 18) * sweep;
+      const major = k % 2 === 0;
+      ctx.beginPath();
+      ctx.moveTo(c + Math.cos(a) * (R - (major ? 16 : 10)), c + Math.sin(a) * (R - (major ? 16 : 10)));
+      ctx.lineTo(c + Math.cos(a) * (R - 2), c + Math.sin(a) * (R - 2));
+      ctx.lineWidth = major ? 3 : 1.5;
+      ctx.strokeStyle = k >= 15 ? '#ff6b75' : '#cfe9ff';
+      ctx.stroke();
+      if (major) ctx.fillText(String(k / 2), c + Math.cos(a) * (R - 30), c + Math.sin(a) * (R - 30));
+    }
+
+    // Nitrous arc along the bottom.
+    ctx.beginPath();
+    ctx.arc(c, c, R + 2, Math.PI * 0.3, Math.PI * 0.7);
+    ctx.lineWidth = 6;
+    ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(c, c, R + 2, Math.PI * 0.7 - Math.PI * 0.4 * nitro, Math.PI * 0.7);
+    ctx.strokeStyle = nitroOn ? '#ff2fd6' : '#38f2ff';
+    ctx.stroke();
+
+    // Needle.
+    const a = a0 + Math.min(1.02, rpm) * sweep;
+    ctx.beginPath();
+    ctx.moveTo(c - Math.cos(a) * 14, c - Math.sin(a) * 14);
+    ctx.lineTo(c + Math.cos(a) * (R - 8), c + Math.sin(a) * (R - 8));
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = '#ff2fd6';
+    ctx.shadowColor = '#ff2fd6';
+    ctx.shadowBlur = 12;
+    ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Gear and speed.
+    ctx.fillStyle = rpm > 0.8 && gear !== 'R' ? '#ff6b75' : '#ffffff';
+    ctx.font = `italic ${S * 0.2}px "Russo One", Impact, sans-serif`;
+    ctx.fillText(String(gear), c, c - S * 0.03);
+    ctx.fillStyle = '#38f2ff';
+    ctx.font = `italic ${S * 0.13}px "Russo One", Impact, sans-serif`;
+    ctx.fillText(String(Math.round(kmh)), c, c + S * 0.2);
+    ctx.fillStyle = 'rgba(207,233,255,0.6)';
+    ctx.font = `600 ${S * 0.05}px Inter, sans-serif`;
+    ctx.fillText('KM/H', c, c + S * 0.29);
+  }
+
+  setActions(actions) {
+    const box = $('actions');
+    if (box.children.length !== actions.length) {
+      box.replaceChildren(...actions.map((a) => {
+        const slot = el('div', 'action');
+        slot.title = a.name;
+        slot.append(el('span', 'icon', a.icon), el('kbd', '', a.key), el('div', 'fill'));
+        return slot;
+      }));
+    }
+    actions.forEach((a, k) => {
+      const slot = box.children[k];
+      slot.classList.toggle('ready', a.ready >= 1);
+      slot.lastChild.style.transform = `scaleY(${1 - a.ready})`;
+    });
+  }
+
+  setEffects(fog, glare) {
+    const f = $('fog-fx');
+    const g = $('glare-fx');
+    f.style.opacity = fog.toFixed(3);
+    g.style.opacity = Math.min(1, glare * 1.2).toFixed(3);
+  }
+
+  phone(caller, text, from, ms) {
+    const box = $('phone');
+    $('phone-caller').textContent = caller;
+    $('phone-text').textContent = text;
+    $('phone-from').textContent = `(courtesy of ${from})`;
+    box.hidden = false;
+    box.style.animation = 'none';
+    void box.offsetWidth;
+    box.style.animation = '';
+    clearTimeout(this.phoneTimer);
+    this.phoneTimer = setTimeout(() => { box.hidden = true; }, ms);
+  }
+
+  nowPlaying(song) {
+    const box = $('now-playing');
+    $('np-title').textContent = song.title;
+    $('np-artist').textContent = song.artist;
+    $('np-album').textContent = song.album;
+    box.hidden = false;
+    box.classList.remove('out');
+    clearTimeout(this.npTimer);
+    this.npTimer = setTimeout(() => box.classList.add('out'), 6000);
   }
 
   setBanner(text) {
-    const el = $('banner');
-    el.hidden = !text;
+    const node = $('banner');
+    node.hidden = !text;
     if (text) this.setText('banner', text);
   }
 
   setCountdown(text) {
-    const el = $('countdown');
+    const node = $('countdown');
     if (!text) {
-      el.hidden = true;
+      node.hidden = true;
       this.lastText.countdown = null;
       return;
     }
     if (this.lastText.countdown === text) return;
     this.lastText.countdown = text;
-    el.textContent = text;
-    el.hidden = false;
-    // restart the pop animation
-    el.style.animation = 'none';
-    void el.offsetWidth;
-    el.style.animation = '';
+    node.textContent = text;
+    node.hidden = false;
+    node.style.animation = 'none';
+    void node.offsetWidth;
+    node.style.animation = '';
   }
 
   bigMessage(text, ms = 2500) {
-    const el = $('big-msg');
-    el.textContent = text;
-    el.hidden = false;
-    el.style.animation = 'none';
-    void el.offsetWidth;
-    el.style.animation = '';
+    const node = $('big-msg');
+    node.textContent = text;
+    node.hidden = false;
+    node.style.animation = 'none';
+    void node.offsetWidth;
+    node.style.animation = '';
     clearTimeout(this.bigTimer);
-    this.bigTimer = setTimeout(() => { el.hidden = true; }, ms);
+    this.bigTimer = setTimeout(() => { node.hidden = true; }, ms);
   }
 
   toast(text, ms = 3000) {
     const box = $('toasts');
-    const el = document.createElement('div');
-    el.className = 'toast';
-    el.textContent = text;
-    box.append(el);
+    const node = el('div', 'toast', text);
+    box.append(node);
     while (box.children.length > 4) box.firstChild.remove();
-    setTimeout(() => { el.style.opacity = '0'; }, ms);
-    setTimeout(() => el.remove(), ms + 400);
+    setTimeout(() => { node.style.opacity = '0'; }, ms);
+    setTimeout(() => node.remove(), ms + 400);
   }
 
   // ---------- results ----------
@@ -200,26 +347,21 @@ export class Hud {
     const racers = players.filter((p) => p.inRace);
     const sorted = [...racers].sort((a, b) => (a.place ?? 99) - (b.place ?? 99));
     const me = racers.find((p) => p.id === myId);
-    $('results-quip').textContent = me?.place
-      ? finishQuip(me.place, racers.length)
-      : me ? 'DNF. The brake pedal is the one on the left.' : 'You were spectating. Next race is yours.';
+    let quip = 'You were spectating. Next race is yours.';
+    if (me?.place) quip = finishQuip(me.place, racers.length);
+    else if (me) quip = 'DNF. The gas pedal is the one on the right.';
+    $('results-quip').textContent = quip;
 
     $('results-list').replaceChildren(...sorted.map((p) => {
-      const li = document.createElement('li');
-      if (p.id === myId) li.className = 'me';
-      const place = document.createElement('span');
-      place.className = 'place';
-      place.textContent = p.place ? `${p.place}${ordinal(p.place)}` : '—';
-      const dot = document.createElement('span');
-      dot.className = 'dot';
-      dot.style.background = p.color;
-      const name = document.createElement('span');
-      name.className = 'name';
-      name.textContent = p.name;
-      const time = document.createElement('span');
-      time.className = 'time';
-      time.textContent = p.finished ? formatTime(p.time) : 'DNF';
-      li.append(place, dot, name, time);
+      const li = el('li', p.id === myId ? 'me' : '');
+      const dot = el('span', 'dot');
+      dot.style.background = p.look.color;
+      li.append(
+        el('span', 'place', p.place ? `${p.place}${ordinal(p.place)}` : '—'),
+        dot,
+        el('span', 'name', p.name),
+        el('span', 'time', p.finished ? formatTime(p.time) : 'DNF'),
+      );
       return li;
     }));
     $('results').hidden = false;
@@ -233,63 +375,77 @@ export class Hud {
     $('results').hidden = true;
   }
 
-  // ---------- minimap ----------
+  // ---------- minimap: rotates with the car, like the real thing ----------
 
-  prepareMinimap() {
-    const canvas = $('minimap');
-    const size = canvas.width;
+  drawMinimap(me, dots) {
+    const ctx = this.map;
+    const S = ctx.canvas.width;
+    const c = S / 2;
+    const scale = 0.3;
     const { px, pz } = this.track;
-    let minX = Infinity; let maxX = -Infinity; let minZ = Infinity; let maxZ = -Infinity;
-    for (let i = 0; i < SAMPLES; i++) {
-      minX = Math.min(minX, px[i]); maxX = Math.max(maxX, px[i]);
-      minZ = Math.min(minZ, pz[i]); maxZ = Math.max(maxZ, pz[i]);
-    }
-    const pad = 22;
-    const scale = (size - pad * 2) / Math.max(maxX - minX, maxZ - minZ);
-    const cx = (minX + maxX) / 2;
-    const cz = (minZ + maxZ) / 2;
-    // Mirror x so the map matches what you see from behind the car (+x is to the left).
-    this.mapXY = (x, z) => [size / 2 - (x - cx) * scale, size / 2 - (z - cz) * scale];
+    const fx = Math.sin(me.h);
+    const fz = Math.cos(me.h);
+    const rx = -fz; // screen right is the car's right, which is world (-cos h, sin h)
+    const rz = fx;
+    const toScreen = (x, z) => {
+      const dx = x - me.x;
+      const dz = z - me.z;
+      return [c + (dx * rx + dz * rz) * scale, c - (dx * fx + dz * fz) * scale];
+    };
 
-    const bg = document.createElement('canvas');
-    bg.width = bg.height = size;
-    const ctx = bg.getContext('2d');
-    ctx.lineJoin = 'round';
+    ctx.clearRect(0, 0, S, S);
+    ctx.save();
     ctx.beginPath();
-    for (let i = 0; i <= SAMPLES; i += 4) {
-      const [x, y] = this.mapXY(px[i % SAMPLES], pz[i % SAMPLES]);
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.closePath();
-    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
-    ctx.lineWidth = 7;
-    ctx.stroke();
-    ctx.strokeStyle = '#3b3c42';
-    ctx.lineWidth = 4;
-    ctx.stroke();
-    const [sx, sy] = this.mapXY(px[0], pz[0]);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(sx - 2, sy - 6, 4, 12);
-    this.mapBg = bg;
-    this.mapCtx = canvas.getContext('2d');
-  }
+    ctx.arc(c, c, c - 2, 0, Math.PI * 2);
+    ctx.clip();
+    ctx.fillStyle = 'rgba(6,8,16,0.75)';
+    ctx.fill();
 
-  // dots: [{ x, z, color, me }]
-  drawMinimap(dots) {
-    const ctx = this.mapCtx;
-    const size = ctx.canvas.width;
-    ctx.clearRect(0, 0, size, size);
-    ctx.drawImage(this.mapBg, 0, 0);
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < SAMPLES; i += 3) {
+      const [x, y] = toScreen(px[i], pz[i]);
+      if (!started) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+      started = true;
+    }
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(56,242,255,0.35)';
+    ctx.lineWidth = 10;
+    ctx.stroke();
+    ctx.strokeStyle = '#d7f9ff';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    for (const [i, color] of [[this.track.startIdx, '#38f2ff'], [this.track.finishIdx, '#ff2fd6']]) {
+      const [x, y] = toScreen(px[i], pz[i]);
+      ctx.fillStyle = color;
+      ctx.fillRect(x - 5, y - 5, 10, 10);
+    }
+
     for (const d of dots) {
-      const [x, y] = this.mapXY(d.x, d.z);
+      const [x, y] = toScreen(d.x, d.z);
       ctx.beginPath();
-      ctx.arc(x, y, d.me ? 6 : 4.5, 0, Math.PI * 2);
+      ctx.arc(x, y, 5, 0, Math.PI * 2);
       ctx.fillStyle = d.color;
       ctx.fill();
-      ctx.lineWidth = d.me ? 2.5 : 1.5;
-      ctx.strokeStyle = d.me ? '#fff' : '#000';
+      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = '#000';
       ctx.stroke();
     }
+
+    // You: an arrow pointing up.
+    ctx.beginPath();
+    ctx.moveTo(c, c - 9);
+    ctx.lineTo(c + 6, c + 7);
+    ctx.lineTo(c, c + 3);
+    ctx.lineTo(c - 6, c + 7);
+    ctx.closePath();
+    ctx.fillStyle = '#ffffff';
+    ctx.shadowColor = '#38f2ff';
+    ctx.shadowBlur = 8;
+    ctx.fill();
+    ctx.restore();
   }
 }

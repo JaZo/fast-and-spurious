@@ -1,21 +1,24 @@
 const GAME_KEYS = new Set([
   'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space', 'KeyW', 'KeyA', 'KeyS', 'KeyD',
-  'ShiftLeft', 'ShiftRight', 'KeyH', 'KeyR', 'KeyC', 'Enter',
+  'ShiftLeft', 'ShiftRight', 'KeyH', 'KeyR', 'KeyC', 'Enter', 'KeyQ', 'KeyF', 'KeyG', 'KeyM', 'KeyN',
 ]);
 
-const isTyping = (e) => e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement;
+const isTyping = (e) => e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
 
-// Standard gamepad mapping: RT throttle, LT brake, A drift, B nitro, Y honk, X reset, Back camera.
-const PAD = { throttle: 7, brake: 6, drift: 0, nitro: 1, honk: 3, reset: 2, camera: 8, ready: 9 };
+// Standard gamepad mapping.
+const PAD = {
+  throttle: 7, brake: 6, drift: 0, nitro: 1, honk: 3, reset: 2, camera: 8, ready: 9, purge: 4, brights: 5, call: 12,
+};
 
 export class Input {
   constructor() {
     this.down = new Set();
     this.pressed = new Set();
     this.padPrev = [];
+    this.enabled = true;
 
     addEventListener('keydown', (e) => {
-      if (isTyping(e)) return;
+      if (isTyping(e) || !this.enabled) return;
       if (GAME_KEYS.has(e.code)) e.preventDefault();
       if (!e.repeat) this.pressed.add(e.code);
       this.down.add(e.code);
@@ -38,6 +41,11 @@ export class Input {
       reset: once('KeyR'),
       camera: once('KeyC'),
       ready: once('Enter'),
+      purge: once('KeyQ'),
+      brights: once('KeyF'),
+      call: once('KeyG'),
+      mute: once('KeyM'),
+      nextTrack: once('KeyN'),
     };
     this.pressed.clear();
 
@@ -51,12 +59,17 @@ export class Input {
       out.brake = Math.max(out.brake, b(PAD.brake));
       out.handbrake ||= b(PAD.drift) > 0.5;
       out.nitro ||= b(PAD.nitro) > 0.5;
-      out.horn ||= edge(PAD.honk);
-      out.reset ||= edge(PAD.reset);
-      out.camera ||= edge(PAD.camera);
-      out.ready ||= edge(PAD.ready);
+      for (const key of ['horn', 'reset', 'camera', 'ready', 'purge', 'brights', 'call']) {
+        out[key] ||= edge(PAD[key === 'horn' ? 'honk' : key]);
+      }
       this.padPrev = pad.buttons.map((btn) => btn.value);
     }
     return out;
+  }
+
+  static neutral() {
+    return {
+      throttle: 0, brake: 0, steer: 0, handbrake: false, nitro: false,
+    };
   }
 }

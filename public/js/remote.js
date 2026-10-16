@@ -13,21 +13,32 @@ function lerpAngle(a, b, t) {
 // Another player's car, rendered slightly in the past and interpolated between snapshots.
 export class RemoteCar {
   constructor(info, scene) {
-    this.info = info;
-    this.model = new CarModel(info.color, { name: info.name, hatSeed: info.id });
-    this.model.root.visible = false;
-    scene.add(this.model.root);
+    this.scene = scene;
     this.buf = [];
-    this.cpCount = 0;
     this.trackIdx = 0;
     this.state = { x: 0, z: 0, h: 0, speed: 0, steer: 0, flags: 0 };
     this.visible = false;
+    this.model = null;
+    this.setInfo(info);
   }
 
-  push(t, x, z, h, v, s, f, c, i) {
+  // Rebuilds the model when the player changes their car in the garage.
+  setInfo(info) {
+    this.info = info;
+    const key = JSON.stringify(info.look);
+    if (key === this.lookKey) return;
+    this.lookKey = key;
+    const opacity = this.model?.opacity ?? 1;
+    this.model?.dispose();
+    this.model = new CarModel(info.look, { name: info.name });
+    this.model.root.visible = this.visible;
+    this.model.setOpacity(opacity);
+    this.scene.add(this.model.root);
+  }
+
+  push(t, x, z, h, v, s, f, i) {
     this.buf.push({ t, x, z, h, v, s, f });
     if (this.buf.length > 30) this.buf.shift();
-    this.cpCount = c;
     this.trackIdx = i;
   }
 

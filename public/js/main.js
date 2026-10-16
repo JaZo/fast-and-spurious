@@ -1,84 +1,129 @@
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
-import { LAPS, CHECKPOINTS, TICK_RATE } from '/shared/config.js';
+import { CHECKPOINTS, TICK_RATE, TRACK_NAME } from './config.js';
 import { Track, SAMPLES } from './track.js';
-import { CarPhysics, CarModel, CAR_RADIUS, FLAG_DRIFT } from './car.js';
+import {
+  buildCity, buildSky, nightEnvironment, SKY_HORIZON,
+} from './city.js';
+import {
+  CarPhysics, CarModel, CAR_RADIUS, FLAG_DRIFT,
+} from './car.js';
 import { RemoteCar } from './remote.js';
 import { Input } from './input.js';
-import { Net } from './net.js';
-import { Hud } from './hud.js';
+import { Network } from './net.js';
+import { Hud, storage } from './hud.js';
 import { AudioFX } from './audio.js';
+import { Music } from './music.js';
 import { Particles } from './particles.js';
+import { Post } from './post.js';
+import { Garage } from './garage.js';
+import { Spurious } from './spurious.js';
+import { loadBuild, computeTuning } from './tuning.js';
 import * as fun from './fun.js';
 
 // ---------- scene ----------
 
 const canvas = document.getElementById('game');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 0.9;
 
-const SKY = 0x9fd4f5;
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(SKY);
-scene.fog = new THREE.Fog(SKY, 250, 1500);
-// Soft studio reflections so the paint looks like paint.
-scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
-scene.environmentIntensity = 0.5;
+scene.background = new THREE.Color(SKY_HORIZON);
+scene.fog = new THREE.Fog(SKY_HORIZON, 40, 750);
+const env = nightEnvironment(renderer);
+scene.environment = env;
+scene.environmentIntensity = 0.4;
 
-const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 3000);
+const camera = new THREE.PerspectiveCamera(65, 1, 0.1, 4000);
 
-scene.add(new THREE.HemisphereLight(0xcfe9ff, 0x4a6b3a, 1.2));
-const sun = new THREE.DirectionalLight(0xfff1d6, 2.6);
-sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-Object.assign(sun.shadow.camera, { left: -70, right: 70, top: 70, bottom: -70, near: 1, far: 400 });
-sun.shadow.bias = -0.0005;
-scene.add(sun, sun.target);
+scene.add(new THREE.HemisphereLight(0x5866a8, 0x140c1c, 0.35));
+const moon = new THREE.DirectionalLight(0x9fb0ff, 0.6);
+moon.castShadow = true;
+moon.shadow.mapSize.set(2048, 2048);
+Object.assign(moon.shadow.camera, { left: -45, right: 45, top: 45, bottom: -45, near: 1, far: 300 });
+moon.shadow.bias = -0.0005;
+scene.add(moon, moon.target);
+
+// Only the local car gets a real headlight; everyone else gets a fake beam on the road.
+const headlight = new THREE.SpotLight(0xfff2dd, 140, 110, 0.55, 0.55, 1.4);
+headlight.position.set(0, 0.7, 2.6); // ahead of the bumper, so it never lights our own car
+headlight.target.position.set(0, 0, 20);
 
 const track = new Track(scene);
+buildCity(scene, track);
+const sky = buildSky(scene);
 const particles = new Particles(scene);
 const hud = new Hud(track);
 const input = new Input();
 const audio = new AudioFX();
+const music = new Music(audio);
+const post = new Post(renderer);
+const spurious = new Spurious({ hud, audio, music, particles });
+music.onTrack = (song) => hud.nowPlaying(song);
+
+function applyQuality(q) {
+  const high = q !== 'low';
+  post.enabled = high;
+  renderer.setPixelRatio(high ? Math.min(devicePixelRatio, 2) : 1);
+  if (renderer.shadowMap.enabled !== high) {
+    renderer.shadowMap.enabled = high;
+    scene.traverse((o) => { for (const m of [].concat(o.material ?? [])) m.needsUpdate = true; });
+  }
+  resize();
+}
 
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);
+  post.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
   particles.setViewportHeight(innerHeight * renderer.getPixelRatio());
 }
 addEventListener('resize', resize);
-resize();
+applyQuality(storage.get('fs.quality', 'high'));
+
+// Browsers only allow audio after a user gesture; start the menu music on the first one.
+const unlockAudio = () => {
+  audio.init();
+  if (!music.song) music.playMenu();
+};
+addEventListener('pointerdown', unlockAudio, { once: true });
+addEventListener('keydown', unlockAudio, { once: true });
 
 // ---------- game state ----------
 
 const me = {
   id: 0,
-  physics: new CarPhysics(),
+  build: loadBuild(),
+  physics: null,
   model: null,
   horn: 'classic',
-  lap: 0,
   nextCp: 0,
-  cpCount: 0,
   finished: false,
   finishTime: null,
 };
+me.physics = new CarPhysics(computeTuning(me.build));
+audio.configureCar({ turbo: me.build.perf.turbo, exhaust: me.build.look.exhaust });
+
 const remotes = new Map();
-let room = { code: '', phase: 'lobby', players: [] };
+let room = { code: '', phase: 'none', players: [] };
 let playersById = new Map();
 let net = null;
 let goTime = 0; // performance.now() timestamp of the green light
 let phaseEndsLocal = 0;
 let camMode = 0;
+let camHeading = 0;
 let snapCamera = true;
 let lastWallQuip = 0;
 let lastBumpQuip = 0;
 let lastReset = 0;
 let lastCountdownSecond = null;
 let wrongWayTime = 0;
+let prevThrottle = 0;
+let prevNitro = false;
+let disconnected = false;
 
 const myInfo = () => playersById.get(me.id);
 const isRacePhase = () => room.phase === 'countdown' || room.phase === 'racing';
@@ -86,23 +131,92 @@ const amRacing = () => isRacePhase() && !!myInfo()?.inRace;
 // Players who aren't (or are no longer) competing drive as ghosts so they can't wreck the race.
 const isGhost = (info, finished) => isRacePhase() && (!info?.inRace || finished);
 
+const garage = new Garage(env, {
+  onClose: (build) => {
+    input.enabled = true;
+    applyBuild(build);
+    if (me.model) hud.showGame();
+    else hud.showMenu(true);
+  },
+});
+
+function openGarage() {
+  if (isRacePhase()) return;
+  input.enabled = false;
+  hud.showMenu(false);
+  document.getElementById('hud').hidden = true;
+  garage.open(me.build);
+}
+
+function applyBuild(build) {
+  me.build = build;
+  me.physics.tune(computeTuning(build));
+  audio.configureCar({ turbo: build.perf.turbo, exhaust: build.look.exhaust });
+  if (me.model) {
+    const opacity = me.model.opacity;
+    me.model.dispose();
+    spawnModel();
+    me.model.setOpacity(opacity);
+  }
+  net?.send({ t: 'look', look: build.look });
+}
+
+function spawnModel() {
+  me.model = new CarModel(me.build.look);
+  me.model.root.add(headlight, headlight.target);
+  scene.add(me.model.root);
+}
+
 // ---------- networking ----------
 
-hud.bindMenu(({ name, room: code, color }) => {
-  audio.init();
-  net = new Net({
+hud.bindMenu({
+  onCreate: (details) => enterRoom('create', details),
+  onJoin: (details) => enterRoom('join', details),
+  onGarage: () => {
+    unlockAudio();
+    openGarage();
+  },
+  onMusicVolume: (v) => audio.setMusicVolume(v),
+  onQuality: applyQuality,
+});
+hud.bindLobby({ onReady: toggleReady, onGarage: openGarage });
+
+async function enterRoom(mode, details) {
+  if (net) return; // already connecting or connected
+  document.activeElement?.blur(); // so Enter (= ready) doesn't click the menu button again
+  unlockAudio();
+  hud.menuBusy(mode === 'create' ? 'Opening a room in the underground…' : `Looking for room ${details.room}…`);
+  net = new Network({
     welcome: onWelcome,
     room: onRoom,
     snap: onSnap,
     honk: onHonk,
+    act: (msg) => spurious.receive(msg, actionContext),
     event: onEvent,
     error: (msg) => hud.menuError(msg.msg),
-    close: () => { if (me.id) hud.showDisconnected(); else hud.menuError('Could not reach the server. Is it running?'); },
+    close: () => lostConnection('The host left, and took the room with them.'),
   });
-  net.connect(() => net.send({ t: 'join', name, room: code, color }));
-});
+  const joinMsg = { t: 'join', name: details.name, look: me.build.look };
+  try {
+    if (mode === 'create') await net.host(joinMsg);
+    else await net.join(details.room, joinMsg);
+  } catch (err) {
+    net.peer?.destroy();
+    net = null;
+    hud.menuError(err.message);
+    return;
+  }
+  music.playRace();
+}
 
-hud.bindLobby(toggleReady);
+// Tell the others right away when the tab closes, instead of letting them time out.
+addEventListener('pagehide', () => net?.peer?.destroy());
+
+function lostConnection(text) {
+  if (disconnected || !me.id) return;
+  disconnected = true;
+  hud.showDisconnected(text);
+}
 
 function toggleReady() {
   if (room.phase !== 'lobby') return;
@@ -112,13 +226,14 @@ function toggleReady() {
 function onWelcome(msg) {
   me.id = msg.id;
   me.horn = msg.horn;
-  me.model = new CarModel(msg.color, { hatSeed: msg.id });
-  scene.add(me.model.root);
+  spawnModel();
   me.physics.place(track.gridPose(msg.slot % 8));
   snapCamera = true;
-  history.replaceState(null, '', `?room=${encodeURIComponent(msg.room)}`);
+  history.replaceState(null, '', `${location.pathname}?room=${encodeURIComponent(msg.room)}`);
+  hud.menuBusy(null);
   hud.showGame();
-  hud.toast(`Welcome, ${msg.name}! Share room code ${msg.room} with your friends.`, 5000);
+  hud.toast(`Welcome to ${TRACK_NAME}, ${msg.name}! Room code: ${msg.room}`, 5000);
+  if (net.isHost) hud.toast('You are hosting. Keep this tab open, or the room closes.', 6000);
 }
 
 function onRoom(msg) {
@@ -129,8 +244,9 @@ function onRoom(msg) {
 
   for (const p of msg.players) {
     if (p.id === me.id) continue;
-    if (!remotes.has(p.id)) remotes.set(p.id, new RemoteCar(p, scene));
-    remotes.get(p.id).info = p;
+    const r = remotes.get(p.id);
+    if (r) r.setInfo(p);
+    else remotes.set(p.id, new RemoteCar(p, scene));
   }
   for (const [id, r] of remotes) {
     if (!playersById.has(id)) {
@@ -141,24 +257,29 @@ function onRoom(msg) {
 
   const mine = myInfo();
   if (msg.phase === 'countdown' && prevPhase !== 'countdown' && mine?.inRace) {
+    garage.close();
     me.physics.place(track.gridPose(msg.grid?.[me.id] ?? 0));
     me.physics.nitro = 1;
-    Object.assign(me, { lap: 0, nextCp: 0, cpCount: 0, finished: false, finishTime: null });
+    Object.assign(me, { nextCp: 0, finished: false, finishTime: null });
     goTime = phaseEndsLocal;
     lastCountdownSecond = null;
     snapCamera = true;
     hud.hideResults();
   }
   if (msg.phase === 'results' && prevPhase !== 'results') hud.showResults(msg.players, me.id);
-  if (msg.phase === 'lobby' && prevPhase !== 'lobby') hud.hideResults();
-
-  hud.updateRoom(room, me.id);
+  if (msg.phase === 'lobby' && prevPhase !== 'lobby' && prevPhase !== 'none') {
+    // Back to the start line for free roam.
+    hud.hideResults();
+    me.physics.place(track.gridPose((mine?.slot ?? 0) % 8));
+    snapCamera = true;
+  }
+  hud.updateRoom(room, me.id, net?.isHost);
 }
 
 function onSnap(msg) {
   const now = performance.now();
-  for (const [id, x, z, h, v, s, f, c, i] of msg.p) {
-    if (id !== me.id) remotes.get(id)?.push(now, x, z, h, v, s, f, c, i);
+  for (const [id, x, z, h, v, s, f, i] of msg.p) {
+    if (id !== me.id) remotes.get(id)?.push(now, x, z, h, v, s, f, i);
   }
 }
 
@@ -180,7 +301,7 @@ function onEvent(msg) {
       me.finishTime = msg.time;
       const total = room.players.filter((p) => p.inRace).length;
       hud.bigMessage(fun.finishQuip(msg.place, total), 4000);
-      audio.honk(me.horn, 0.8);
+      audio.fanfare();
     }
   }
 }
@@ -191,52 +312,58 @@ function respawn() {
   const now = performance.now();
   if (me.physics.frozen || now - lastReset < 1500) return;
   lastReset = now;
-  const i = me.physics.trackIdx >= 0 ? me.physics.trackIdx : 0;
+  const i = Math.max(2, Math.min(SAMPLES - 3, me.physics.trackIdx));
   me.physics.place({ x: track.px[i], z: track.pz[i], h: track.headingAt(i), i });
   snapCamera = true;
   hud.toast(fun.pick(fun.RESET_QUIPS));
 }
 
-// Race progress as a single comparable number: checkpoints passed + fraction towards the next one.
-function progressScore(cpCount, trackIdx) {
-  const segment = SAMPLES / CHECKPOINTS;
-  const last = (((cpCount - 1) % CHECKPOINTS) + CHECKPOINTS) % CHECKPOINTS;
-  const frac = ((trackIdx - track.cpIndex(last) + SAMPLES) % SAMPLES) / segment;
-  return cpCount + Math.min(0.999, Math.max(0, frac));
-}
-
+// Finished drivers by place, then everyone else by how far along the street they are.
 function standings() {
   const entries = [];
   for (const p of room.players) {
     if (!p.inRace) continue;
-    if (p.id === me.id) {
-      entries.push({ id: p.id, place: p.place, score: progressScore(me.cpCount, me.physics.trackIdx) });
-    } else {
-      const r = remotes.get(p.id);
-      entries.push({ id: p.id, place: p.place, score: r ? progressScore(r.cpCount, r.trackIdx) : 0 });
-    }
+    const idx = p.id === me.id ? me.physics.trackIdx : (remotes.get(p.id)?.trackIdx ?? 0);
+    entries.push({ id: p.id, place: p.place, idx, color: p.look.color });
   }
   entries.sort((a, b) => {
     if (a.place || b.place) return (a.place ?? 99) - (b.place ?? 99);
-    return b.score - a.score;
+    return b.idx - a.idx;
   });
   return entries;
 }
 
+const actionContext = {
+  me,
+  remotes,
+  nameOf: (id) => playersById.get(id)?.name ?? 'someone',
+  // The driver directly ahead of you (or behind, if you're leading). Outside a race: whoever is closest.
+  callTarget: () => {
+    if (amRacing()) {
+      const order = standings().filter((e) => !e.place);
+      const k = order.findIndex((e) => e.id === me.id);
+      if (k < 0) return null;
+      return order[k - 1]?.id ?? order[k + 1]?.id ?? null;
+    }
+    let best = null;
+    let bestD = Infinity;
+    for (const [id, r] of remotes) {
+      const d = Math.hypot(r.state.x - me.physics.x, r.state.z - me.physics.z);
+      if (r.visible && d < bestD) {
+        bestD = d;
+        best = id;
+      }
+    }
+    return best;
+  },
+};
+
 function checkCheckpoints() {
   if (room.phase !== 'racing' || !amRacing() || me.finished || me.physics.frozen) return;
-  const ci = track.cpIndex(me.nextCp);
-  const past = (me.physics.trackIdx - ci + SAMPLES) % SAMPLES;
-  if (past >= SAMPLES / CHECKPOINTS / 2) return;
-
-  net.send({ t: 'cp', i: me.nextCp });
-  if (me.nextCp === 0) {
-    me.lap++;
-    if (me.lap === LAPS) hud.bigMessage("FINAL LAP! Don't bottle it.");
-    else if (me.lap > 1 && me.lap < LAPS) hud.bigMessage(`LAP ${me.lap}`, 1500);
+  while (me.nextCp < CHECKPOINTS && me.physics.trackIdx >= track.cpIndex(me.nextCp)) {
+    net.send({ t: 'cp', i: me.nextCp });
+    me.nextCp++;
   }
-  me.nextCp = (me.nextCp + 1) % CHECKPOINTS;
-  me.cpCount++;
 }
 
 function collideWithRemotes() {
@@ -269,19 +396,17 @@ function collideWithRemotes() {
   }
 }
 
-const wheelPos = [new THREE.Vector3(), new THREE.Vector3()];
+const smokePos = [new THREE.Vector3(), new THREE.Vector3()];
 function smokeFrom(model, speed, flags, dt) {
   if ((flags & FLAG_DRIFT) === 0 || Math.abs(speed) < 8 || Math.random() > dt * 40) return;
-  model.rearWheels(wheelPos);
-  particles.spawn(wheelPos[0]);
-  particles.spawn(wheelPos[1]);
+  model.localToWorld([[-0.85, 0.3, -1.38], [0.85, 0.3, -1.38]], smokePos);
+  for (const p of smokePos) particles.spawn(p);
 }
 
 // ---------- camera ----------
 
 const camLook = new THREE.Vector3();
-let camHeading = 0;
-let orbit = 0;
+let flyT = 0;
 
 function updateCamera(dt) {
   const p = me.physics;
@@ -296,30 +421,41 @@ function updateCamera(dt) {
   const fx = Math.sin(p.h);
   const fz = Math.cos(p.h);
   if (camMode === 0) {
-    const back = 7 + speed * 0.03;
-    camera.position.set(p.x - Math.sin(camHeading) * back, 2.8 + speed * 0.01, p.z - Math.cos(camHeading) * back);
-    camLook.set(p.x + fx * 4, 1.2, p.z + fz * 4);
+    const back = 6.2 + speed * 0.025;
+    camera.position.set(p.x - Math.sin(camHeading) * back, 2.0 + speed * 0.006, p.z - Math.cos(camHeading) * back);
+    camLook.set(p.x + fx * 5, 1.0, p.z + fz * 5);
   } else {
-    camera.position.set(p.x + fx * 0.2, 1.45, p.z + fz * 0.2);
-    camLook.set(p.x + fx * 10, 1.25, p.z + fz * 10);
+    camera.position.set(p.x + fx * 0.3, 1.3, p.z + fz * 0.3);
+    camLook.set(p.x + fx * 10, 1.1, p.z + fz * 10);
   }
-  if (p.nitroOn) camera.position.y += (Math.random() - 0.5) * 0.06;
+  if (p.nitroOn) {
+    camera.position.x += (Math.random() - 0.5) * 0.05;
+    camera.position.y += (Math.random() - 0.5) * 0.05;
+  }
   camera.lookAt(camLook);
 
-  const fov = 62 + Math.min(speed, 80) * 0.22 + (p.nitroOn ? 8 : 0);
+  const fov = 64 + Math.min(speed, 85) * 0.24 + (p.nitroOn ? 10 : 0);
   camera.fov += (fov - camera.fov) * Math.min(1, dt * 4);
   camera.updateProjectionMatrix();
-
-  sun.position.set(p.x + 60, 140, p.z + 40);
-  sun.target.position.set(p.x, 0, p.z);
+  followLights(p.x, p.z);
 }
 
+function followLights(x, z) {
+  moon.position.set(x - 40, 120, z + 60);
+  moon.target.position.set(x, 0, z);
+  sky.position.copy(camera.position);
+}
+
+// Menu backdrop: a slow fly-through down the street.
 function attractCamera(dt) {
-  orbit += dt * 0.05;
-  camera.position.set(Math.cos(orbit) * 480, 170, 120 + Math.sin(orbit) * 480);
-  camera.lookAt(0, 0, 120);
-  sun.position.set(60, 300, 40);
-  sun.target.position.set(0, 0, 120);
+  flyT += dt * 14;
+  const i = Math.floor(flyT / track.segLen) % (SAMPLES - 60);
+  const j = i + 30;
+  camera.position.set(track.px[i] + track.nx[i] * -4, 4.5, track.pz[i] + track.nz[i] * -4);
+  camera.lookAt(track.px[j], 2, track.pz[j]);
+  camera.fov = 62;
+  camera.updateProjectionMatrix();
+  followLights(camera.position.x, camera.position.z);
 }
 
 // ---------- main loop ----------
@@ -334,27 +470,52 @@ function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
 
-  if (!me.model) {
-    attractCamera(dt);
-    renderer.render(scene, camera);
+  const inp = input.read();
+  if (inp.mute) hud.toast(music.toggleMute() ? '🔇 Music off' : '🔊 Music on', 1200);
+  if (inp.nextTrack) music.next();
+
+  if (net?.hostSilent(now)) lostConnection('Lost the connection to the host.');
+
+  if (garage.active) {
+    if (me.model) simulate(now, dt, Input.neutral(), false);
+    garage.update(dt, innerWidth / innerHeight);
+    post.render(garage.scene, garage.camera);
     return;
   }
 
+  if (!me.model) {
+    attractCamera(dt);
+    post.render(scene, camera);
+    return;
+  }
+
+  simulate(now, dt, inp, true);
+  updateCamera(dt);
+  post.render(scene, camera);
+}
+
+function simulate(now, dt, inp, interactive) {
   const p = me.physics;
   const mine = myInfo();
   const racing = amRacing();
-  const inp = input.read();
 
-  if (inp.horn) {
-    net.send({ t: 'honk' });
-    audio.honk(me.horn, 1);
-    me.model.honk();
+  if (interactive) {
+    if (inp.horn) {
+      net.send({ t: 'honk' });
+      audio.honk(me.horn, 1);
+      me.model.honk();
+    }
+    if (inp.reset) respawn();
+    if (inp.camera) camMode = (camMode + 1) % 2;
+    if (inp.ready) toggleReady();
+    for (const kind of ['purge', 'brights', 'call']) {
+      if (!inp[kind] || p.frozen) continue;
+      const msg = spurious.trigger(kind, actionContext);
+      if (msg) net.send(msg);
+    }
   }
-  if (inp.reset) respawn();
-  if (inp.camera) camMode = (camMode + 1) % 2;
-  if (inp.ready) toggleReady();
 
-  // Countdown lights.
+  // Countdown.
   p.frozen = racing && now < goTime;
   if (racing && now < goTime) {
     const sec = Math.ceil((goTime - now) / 1000);
@@ -368,7 +529,7 @@ function frame(now) {
       lastCountdownSecond = 0;
       audio.beep(true);
     }
-    hud.setCountdown('SEND IT!');
+    hud.setCountdown('GO GO GO!');
   } else {
     hud.setCountdown(null);
   }
@@ -385,6 +546,16 @@ function frame(now) {
     lastWallQuip = now;
     hud.toast(fun.pick(fun.WALL_QUIPS));
   }
+
+  // Turbo and nitrous noises.
+  if (prevThrottle > 0 && inp.throttle === 0 && p.rpm > 0.6) audio.blowoff(1);
+  if (p.shifted) {
+    if (inp.throttle > 0) audio.blowoff(0.45);
+    p.shifted = false;
+  }
+  if (p.nitroOn && !prevNitro) audio.nitroStart();
+  prevThrottle = inp.throttle;
+  prevNitro = p.nitroOn;
 
   for (const r of remotes.values()) r.update(now, dt);
   collideWithRemotes();
@@ -408,12 +579,13 @@ function frame(now) {
     r.model.setOpacity(isGhost(r.info, r.info.finished) ? 0.35 : 1);
     smokeFrom(r.model, r.state.speed, r.state.flags, dt);
   }
+  spurious.update(dt, actionContext);
   particles.update(dt);
-  updateCamera(dt);
 
-  // Sound.
-  audio.engine(Math.abs(p.forwardSpeed), inp.throttle, p.nitroOn, true);
+  audio.engine(p.rpm, inp.throttle, p.nitroOn, true);
   audio.skid(p.drifting ? Math.min(1, p.speed / 30) : 0);
+
+  if (!interactive) return;
 
   // Wrong-way detection.
   const ti = Math.max(0, p.trackIdx);
@@ -421,13 +593,19 @@ function frame(now) {
   wrongWayTime = along < -5 ? wrongWayTime + dt : 0;
 
   // HUD.
-  hud.setSpeed(p.speed * 3.6, p.nitro, p.nitroOn);
+  hud.drawTacho({
+    rpm: p.rpm, gear: p.gear, kmh: p.speed * 3.6, nitro: p.nitro, nitroOn: p.nitroOn,
+  });
   if (racing) {
     const order = standings();
     const position = Math.max(1, order.findIndex((e) => e.id === me.id) + 1);
     const timeMs = me.finished ? me.finishTime : Math.max(0, now - goTime);
     hud.setRace({
-      position, total: order.length, lap: Math.min(Math.max(me.lap, 1), LAPS), laps: LAPS, timeMs,
+      position,
+      total: order.length,
+      timeMs,
+      toGo: me.finished ? 0 : Math.max(0, (track.finishIdx - p.trackIdx) * track.segLen),
+      markers: order.map((e) => ({ frac: track.progress(e.idx), color: e.color, me: e.id === me.id })),
     });
   } else {
     hud.setRace(null);
@@ -436,21 +614,21 @@ function frame(now) {
   const left = Math.ceil((phaseEndsLocal - now) / 1000);
   let banner = '';
   if (wrongWayTime > 1) banner = '⚠ WRONG WAY, COLUMBUS ⚠';
-  else if (room.phase === 'lobby') banner = 'Free roam! Hit READY when you want to race.';
+  else if (room.phase === 'lobby') banner = 'Free roam! Tune your ride in the GARAGE, then hit READY.';
   else if (isRacePhase() && !mine?.inRace) banner = "👻 Race in progress — you're a ghost until the next one.";
   else if (room.phase === 'racing' && me.finished) banner = 'Finished! Waiting for the slowpokes…';
-  else if (room.phase === 'racing' && room.phaseMs > 0 && left > 0) banner = `Hurry! ${left}s until the bus leaves.`;
+  else if (room.phase === 'racing' && room.phaseMs > 0 && left > 0) banner = `Hurry! ${left}s until the cops show up.`;
   hud.setBanner(banner);
   if (room.phase === 'results') hud.setResultsTimer(left);
 
-  const dots = [{ x: p.x, z: p.z, color: me.model.materials.paint.color.getStyle(), me: true }];
-  for (const r of remotes.values()) if (r.visible) dots.push({ x: r.state.x, z: r.state.z, color: r.info.color });
-  hud.drawMinimap(dots);
-
-  renderer.render(scene, camera);
+  const dots = [];
+  for (const r of remotes.values()) if (r.visible) dots.push({ x: r.state.x, z: r.state.z, color: r.info.look.color });
+  hud.drawMinimap({ x: p.x, z: p.z, h: p.h }, dots);
 }
 
 requestAnimationFrame(frame);
 
 // Handy for poking at the game from the dev console.
-globalThis.__fs = { me, remotes, track, get room() { return room; } };
+globalThis.__fs = {
+  me, remotes, track, get room() { return room; }, get net() { return net; }, music,
+};

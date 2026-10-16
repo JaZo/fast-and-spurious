@@ -4,11 +4,21 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Fast &amp; Spurious</title>
+  <meta name="description" content="Peer-to-peer street racing at night, in your browser. Need for Speed Underground's cousin who failed the driving test.">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🏎️</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Russo+One&family=Inter:wght@400;600;800&display=swap">
-  <link rel="stylesheet" href="/css/style.css">
-  <script type="importmap">{ "imports": { "three": "/vendor/three/three.module.js", "three/addons/": "/vendor/three/addons/" } }</script>
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.185.1/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.185.1/examples/jsm/",
+        "peerjs": "https://cdn.jsdelivr.net/npm/peerjs@1.5.5/+esm"
+      }
+    }
+  </script>
 </head>
 <body>
   <canvas id="game"></canvas>
@@ -17,7 +27,7 @@
   <section id="menu" class="overlay">
     <div class="menu-card">
       <h1 class="logo">FAST <span>&amp;</span> SPURIOUS</h1>
-      <p class="tagline">The Need for Speed knockoff your lawyer warned you about.</p>
+      <p class="tagline">Underground street racing. Overground stupidity.</p>
 
       <label class="field">
         <span>Driver name</span>
@@ -28,39 +38,75 @@
       </label>
 
       <label class="field">
-        <span>Room code <em>(leave empty to start a new room)</em></span>
-        <input id="room" maxlength="6" autocomplete="off" spellcheck="false" placeholder="e.g. VRMM">
+        <span>Room code <em>(to join a friend)</em></span>
+        <input id="room" maxlength="4" autocomplete="off" spellcheck="false" placeholder="e.g. VRMM">
       </label>
 
-      <div class="field">
-        <span>Paint job</span>
-        <div id="swatches" class="swatches"></div>
+      <div class="menu-buttons">
+        <button id="create" class="big-btn" type="button">CREATE ROOM</button>
+        <button id="join" class="big-btn alt" type="button">JOIN</button>
       </div>
-
-      <button id="play" class="big-btn" type="button">FLOOR IT</button>
+      <button id="menu-garage" class="big-btn garage-btn" type="button">🔧 GARAGE</button>
+      <p id="menu-status" class="status" hidden></p>
       <p id="menu-error" class="error" hidden></p>
+
+      <div class="settings">
+        <label>🎵 Music <input id="music-volume" type="range" min="0" max="1" step="0.05"></label>
+        <label>Graphics
+          <select id="quality">
+            <option value="high">Fancy</option>
+            <option value="low">Potato</option>
+          </select>
+        </label>
+      </div>
     </div>
+  </section>
+
+  <!-- Garage (the 3D showroom renders behind this panel) -->
+  <section id="garage" hidden>
+    <div class="garage-panel">
+      <h2>GARAGE</h2>
+      <div class="tabs">
+        <button type="button" data-tab="perf">PERFORMANCE</button>
+        <button type="button" data-tab="visual">VISUAL</button>
+      </div>
+      <div id="garage-cred" class="cred"></div>
+      <div id="garage-rows" class="garage-rows"></div>
+      <p id="garage-msg" class="error" hidden></p>
+      <div id="garage-stats" class="stats"></div>
+      <button id="garage-done" class="big-btn" type="button">DONE</button>
+    </div>
+    <p class="garage-hint">Drag to spin · <kbd>↑</kbd><kbd>↓</kbd> select · <kbd>←</kbd><kbd>→</kbd> change · <kbd>Tab</kbd> switch tab</p>
   </section>
 
   <!-- In-game HUD -->
   <section id="hud" hidden>
     <div id="race-info" class="panel race-info" hidden>
       <div class="pos"><span id="pos">1</span><sup id="pos-suffix">st</sup><small id="pos-total">/1</small></div>
-      <div class="lap">LAP <span id="lap">1/3</span></div>
       <div class="timer" id="timer">0:00.00</div>
+      <div class="to-go" id="to-go"></div>
+    </div>
+
+    <div id="progress" class="progress" hidden>
+      <span class="flag start">START</span>
+      <div class="track-bar"><div id="progress-markers"></div></div>
+      <span class="flag finish">🏁</span>
     </div>
 
     <div id="lobby" class="panel lobby">
       <div class="lobby-head">
         <div>
-          <div class="label">ROOM</div>
+          <div class="label">ROOM <span id="host-badge" class="badge" hidden>YOU HOST</span></div>
           <div id="room-code" class="room-code">----</div>
         </div>
         <button id="copy-link" class="small-btn" type="button">Copy invite link</button>
       </div>
       <ul id="player-list" class="player-list"></ul>
-      <button id="ready" class="big-btn ready-btn" type="button">I'M READY</button>
-      <p class="hint">Race starts when everyone is ready. Press <kbd>Enter</kbd> to toggle.</p>
+      <div class="lobby-buttons">
+        <button id="lobby-garage" class="big-btn alt" type="button">🔧 GARAGE</button>
+        <button id="ready" class="big-btn ready-btn" type="button">I'M READY</button>
+      </div>
+      <p class="hint">Race starts when everyone is ready. <kbd>Enter</kbd> toggles.</p>
     </div>
 
     <div id="banner" class="banner" hidden></div>
@@ -68,23 +114,35 @@
     <div id="big-msg" class="big-msg" hidden></div>
     <div id="toasts" class="toasts"></div>
 
-    <canvas id="minimap" class="minimap" width="200" height="200"></canvas>
+    <div id="now-playing" class="now-playing" hidden>
+      <div class="np-label">♪ NOW PLAYING</div>
+      <div id="np-artist" class="np-artist"></div>
+      <div id="np-title" class="np-title"></div>
+      <div id="np-album" class="np-album"></div>
+    </div>
 
-    <div class="speedo panel">
-      <div class="speed"><span id="speed">0</span><small>km/h</small></div>
-      <div class="nitro"><div id="nitro-fill"></div></div>
-      <div class="nitro-label">NITRO</div>
+    <canvas id="minimap" class="minimap" width="220" height="220"></canvas>
+    <canvas id="tacho" class="tacho" width="240" height="240"></canvas>
+
+    <div id="actions" class="actions"></div>
+
+    <div id="phone" class="phone" hidden>
+      <div class="phone-top">📞 INCOMING CALL</div>
+      <div id="phone-caller" class="phone-caller"></div>
+      <div id="phone-text" class="phone-text"></div>
+      <div id="phone-from" class="phone-from"></div>
     </div>
 
     <div class="controls">
       <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> drive ·
-      <kbd>Space</kbd> drift ·
-      <kbd>Shift</kbd> nitro ·
-      <kbd>H</kbd> honk ·
-      <kbd>R</kbd> reset ·
-      <kbd>C</kbd> camera
+      <kbd>Space</kbd> drift · <kbd>Shift</kbd> nitro ·
+      <kbd>Q</kbd> purge · <kbd>F</kbd> brights · <kbd>G</kbd> spam call ·
+      <kbd>H</kbd> honk · <kbd>R</kbd> reset · <kbd>C</kbd> cam · <kbd>N</kbd>/<kbd>M</kbd> music
     </div>
   </section>
+
+  <div id="fog-fx" class="fx fog"></div>
+  <div id="glare-fx" class="fx glare"></div>
 
   <!-- Results -->
   <section id="results" class="overlay" hidden>
@@ -92,18 +150,19 @@
       <h2>RESULTS</h2>
       <p id="results-quip" class="tagline"></p>
       <ol id="results-list" class="results-list"></ol>
-      <p class="hint">Back to the lobby in <span id="results-timer">10</span>s</p>
+      <p class="hint">Back to the streets in <span id="results-timer">10</span>s</p>
     </div>
   </section>
 
   <section id="disconnected" class="overlay" hidden>
     <div class="menu-card">
       <h2>CONNECTION LOST</h2>
-      <p class="tagline">The server pulled over for snacks.</p>
-      <button class="big-btn" type="button" onclick="location.reload()">RECONNECT</button>
+      <p id="disconnected-text" class="tagline"></p>
+      <button class="big-btn" type="button" onclick="location.reload()">BACK TO MENU</button>
     </div>
   </section>
 
-  <script type="module" src="/js/main.js"></script>
+  <noscript>Fast &amp; Spurious needs JavaScript. And a steering wheel, ideally.</noscript>
+  <script type="module" src="js/main.js"></script>
 </body>
 </html>

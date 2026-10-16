@@ -1,43 +1,44 @@
 import * as THREE from 'three';
-import { TRACK_POINTS, TRACK_WIDTH, CHECKPOINTS } from '/shared/config.js';
-import { BILLBOARDS } from './fun.js';
+import {
+  TRACK_POINTS, ROAD_WIDTH, CHECKPOINTS, START_POINT, FINISH_POINT,
+} from './config.js';
 
-export const SAMPLES = 1200;
-export const ROAD_HALF = TRACK_WIDTH / 2;
-export const CURB = 1.2;
-export const WALL_OFFSET = ROAD_HALF + 8; // gravel run-off between the curb and the tyre wall
+export const SAMPLES = 2400;
+export const ROAD_HALF = ROAD_WIDTH / 2;
+export const SIDEWALK = 4.5;
+export const WALL_OFFSET = ROAD_HALF + SIDEWALK; // concrete barrier at the back of the sidewalk
 
-function canvasTexture(w, h, draw) {
+export function canvasTexture(w, h, draw, { repeat = true, srgb = true } = {}) {
   const c = document.createElement('canvas');
   c.width = w;
   c.height = h;
   draw(c.getContext('2d'), w, h);
   const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  if (srgb) tex.colorSpace = THREE.SRGBColorSpace;
+  if (repeat) tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   tex.anisotropy = 8;
   return tex;
 }
 
-function speckle(ctx, w, h, count, colors) {
+export function speckle(ctx, w, h, count, colors, size = 2) {
   for (let i = 0; i < count; i++) {
     ctx.fillStyle = colors[i % colors.length];
-    ctx.fillRect(Math.random() * w, Math.random() * h, 2, 2);
+    ctx.fillRect(Math.random() * w, Math.random() * h, size, size);
   }
 }
 
+// An open (point-to-point) street circuit: sampled centre line plus the road surface, sidewalks and barriers.
 export class Track {
   constructor(scene) {
     const curve = new THREE.CatmullRomCurve3(
       TRACK_POINTS.map(([x, z]) => new THREE.Vector3(x, 0, z)),
-      true,
+      false,
       'centripetal',
     );
     this.length = curve.getLength();
-    this.segLen = this.length / SAMPLES;
+    this.segLen = this.length / (SAMPLES - 1);
 
-    // Evenly spaced samples with tangent (t) and right-hand normal (n) at each.
-    const pts = curve.getSpacedPoints(SAMPLES);
+    const pts = curve.getSpacedPoints(SAMPLES - 1);
     this.px = new Float32Array(SAMPLES);
     this.pz = new Float32Array(SAMPLES);
     this.tx = new Float32Array(SAMPLES);
@@ -45,8 +46,8 @@ export class Track {
     this.nx = new Float32Array(SAMPLES);
     this.nz = new Float32Array(SAMPLES);
     for (let i = 0; i < SAMPLES; i++) {
-      const prev = pts[(i - 1 + SAMPLES) % SAMPLES];
-      const next = pts[i + 1];
+      const prev = pts[Math.max(0, i - 1)];
+      const next = pts[Math.min(SAMPLES - 1, i + 1)];
       let dx = next.x - prev.x;
       let dz = next.z - prev.z;
       const len = Math.hypot(dx, dz);
@@ -56,33 +57,47 @@ export class Track {
       this.pz[i] = pts[i].z;
       this.tx[i] = dx;
       this.tz[i] = dz;
-      this.nx[i] = -dz;
+      this.nx[i] = -dz; // right-hand side of the driving direction
       this.nz[i] = dx;
     }
 
+    this.startIdx = this.nearest(...START_POINT);
+    this.finishIdx = this.nearest(...FINISH_POINT);
+
     this.group = new THREE.Group();
     scene.add(this.group);
-    this.buildGround();
     this.buildRoad();
-    this.buildStartLine();
-    this.buildScenery();
+    this.buildGantry(this.startIdx, 'START', '#38f2ff');
+    this.buildGantry(this.finishIdx, 'FINISH', '#ff2fd6');
+    this.buildEndCaps();
   }
 
-  cpIndex(cp) {
-    return Math.round((cp * SAMPLES) / CHECKPOINTS) % SAMPLES;
+  // Checkpoint k sits between the start and the finish; the last one is the finish line.
+  cpIndex(k) {
+    return Math.round(this.startIdx + ((k + 1) * (this.finishIdx - this.startIdx)) / CHECKPOINTS);
+  }
+
+  // Index of the sample at a given fraction of the sprint (0 = start line, 1 = finish line).
+  atFraction(f) {
+    return Math.round(this.startIdx + f * (this.finishIdx - this.startIdx));
+  }
+
+  progress(i) {
+    return Math.max(0, Math.min(1, (i - this.startIdx) / (this.finishIdx - this.startIdx)));
   }
 
   headingAt(i) {
     return Math.atan2(this.tx[i], this.tz[i]);
   }
 
-  // Nearest sample index. Searches around `hint` first, falling back to a full scan.
+  // Nearest sample. Searches around `hint` first, falling back to a full scan.
   nearest(x, z, hint = -1) {
     let best = 0;
     let bestD = Infinity;
     if (hint >= 0) {
-      for (let k = -40; k <= 40; k++) {
-        const i = (hint + k + SAMPLES) % SAMPLES;
+      const lo = Math.max(0, hint - 40);
+      const hi = Math.min(SAMPLES - 1, hint + 40);
+      for (let i = lo; i <= hi; i++) {
         const d = (x - this.px[i]) ** 2 + (z - this.pz[i]) ** 2;
         if (d < bestD) {
           bestD = d;
@@ -101,22 +116,38 @@ export class Track {
     return best;
   }
 
+  // Cheap distance to the centre line for scenery placement (coarse scan, then refine).
+  distanceToTrack(x, z) {
+    let best = 0;
+    let bestD = Infinity;
+    for (let i = 0; i < SAMPLES; i += 6) {
+      const d = (x - this.px[i]) ** 2 + (z - this.pz[i]) ** 2;
+      if (d < bestD) {
+        bestD = d;
+        best = i;
+      }
+    }
+    for (let i = Math.max(0, best - 6); i <= Math.min(SAMPLES - 1, best + 6); i++) {
+      bestD = Math.min(bestD, (x - this.px[i]) ** 2 + (z - this.pz[i]) ** 2);
+    }
+    return Math.sqrt(bestD);
+  }
+
   // Signed distance from the centre line; positive is to the right of the driving direction.
   lateral(i, x, z) {
     return (x - this.px[i]) * this.nx[i] + (z - this.pz[i]) * this.nz[i];
   }
 
-  distanceToTrack(x, z) {
-    const i = this.nearest(x, z);
-    return Math.hypot(x - this.px[i], z - this.pz[i]);
+  along(i, x, z) {
+    return (x - this.px[i]) * this.tx[i] + (z - this.pz[i]) * this.tz[i];
   }
 
   // Grid slot k: two columns, rows going back from the start line.
   gridPose(slot) {
     const row = Math.floor(slot / 2);
-    const back = 8 + row * 7;
-    const i = (SAMPLES - Math.round(back / this.segLen)) % SAMPLES;
-    const side = slot % 2 === 0 ? -3.5 : 3.5;
+    const back = 7 + row * 8;
+    const i = Math.max(1, this.startIdx - Math.round(back / this.segLen));
+    const side = slot % 2 === 0 ? -4.5 : 4.5;
     return {
       x: this.px[i] + this.nx[i] * side,
       z: this.pz[i] + this.nz[i] * side,
@@ -125,16 +156,16 @@ export class Track {
     };
   }
 
-  // A flat strip following the track between lateral offsets a and b.
-  ribbon(a, b, y, vLen) {
-    const n = SAMPLES + 1;
+  // A flat strip following the track between lateral offsets a and b, over samples [from, to].
+  ribbon(a, b, y, vLen, from = 0, to = SAMPLES - 1) {
+    const n = to - from + 1;
     const pos = new Float32Array(n * 6);
     const nor = new Float32Array(n * 6);
     const uv = new Float32Array(n * 4);
     const idx = [];
     for (let k = 0; k < n; k++) {
-      const i = k % SAMPLES;
-      const v = (k * this.segLen) / vLen;
+      const i = from + k;
+      const v = (i * this.segLen) / vLen;
       pos.set([this.px[i] + this.nx[i] * a, y, this.pz[i] + this.nz[i] * a,
         this.px[i] + this.nx[i] * b, y, this.pz[i] + this.nz[i] * b], k * 6);
       nor.set([0, 1, 0, 0, 1, 0], k * 6);
@@ -152,18 +183,18 @@ export class Track {
     return geo;
   }
 
-  // A vertical strip at lateral offset `off`.
-  wall(off, height, vLen) {
-    const n = SAMPLES + 1;
+  // A vertical strip at lateral offset `off` from y0 to y1.
+  wall(off, y0, y1, vLen, from = 0, to = SAMPLES - 1) {
+    const n = to - from + 1;
     const pos = new Float32Array(n * 6);
     const uv = new Float32Array(n * 4);
     const idx = [];
     for (let k = 0; k < n; k++) {
-      const i = k % SAMPLES;
+      const i = from + k;
       const x = this.px[i] + this.nx[i] * off;
       const z = this.pz[i] + this.nz[i] * off;
-      const v = (k * this.segLen) / vLen;
-      pos.set([x, 0, z, x, height, z], k * 6);
+      const v = (i * this.segLen) / vLen;
+      pos.set([x, y0, z, x, y1, z], k * 6);
       uv.set([0, v, 1, v], k * 4);
       if (k < n - 1) {
         const q = k * 2;
@@ -178,276 +209,176 @@ export class Track {
     return geo;
   }
 
-  buildGround() {
-    const grass = canvasTexture(128, 128, (ctx, w, h) => {
-      ctx.fillStyle = '#4f8a3a';
-      ctx.fillRect(0, 0, w, h);
-      speckle(ctx, w, h, 1400, ['#5a9a42', '#447a32', '#62a34a', '#3d6e2c']);
-    });
-    grass.repeat.set(400, 400);
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(4000, 4000),
-      new THREE.MeshStandardMaterial({ map: grass, roughness: 1 }),
-    );
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = true;
-    this.group.add(ground);
-  }
-
   buildRoad() {
-    const asphalt = canvasTexture(256, 512, (ctx, w, h) => {
-      ctx.fillStyle = '#3b3c42';
+    // Wet asphalt: dark, with lane markings, and a roughness map with puddles so reflections break up.
+    const asphalt = canvasTexture(512, 512, (ctx, w, h) => {
+      ctx.fillStyle = '#18191e';
       ctx.fillRect(0, 0, w, h);
-      speckle(ctx, w, h, 9000, ['#45464d', '#33343a', '#4d4e55', '#2c2d32']);
-      ctx.fillStyle = '#f2f2f2';
-      ctx.fillRect(6, 0, 7, h);
-      ctx.fillRect(w - 13, 0, 7, h);
-      ctx.fillStyle = '#f5d04a';
-      ctx.fillRect(w / 2 - 3, 0, 6, h / 2);
+      speckle(ctx, w, h, 16000, ['#1f2026', '#141519', '#24252b', '#101114']);
+      const line = (x, width, color, dash) => {
+        ctx.fillStyle = color;
+        if (dash) ctx.fillRect(x - width / 2, 0, width, h * 0.45);
+        else ctx.fillRect(x - width / 2, 0, width, h);
+      };
+      line(w * 0.03, 6, '#d9d9d9');
+      line(w * 0.97, 6, '#d9d9d9');
+      line(w * 0.493, 5, '#d8b23a');
+      line(w * 0.507, 5, '#d8b23a');
+      line(w * 0.25, 5, '#cfcfcf', true);
+      line(w * 0.75, 5, '#cfcfcf', true);
     });
+    const puddles = canvasTexture(256, 256, (ctx, w, h) => {
+      ctx.fillStyle = '#9a9a9a';
+      ctx.fillRect(0, 0, w, h);
+      for (let i = 0; i < 26; i++) {
+        const x = Math.random() * w;
+        const y = Math.random() * h;
+        const r = 8 + Math.random() * 30;
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        g.addColorStop(0, '#0c0c0c');
+        g.addColorStop(1, 'rgba(12,12,12,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.ellipse(x, y, r, r * 0.6, Math.random() * Math.PI, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }, { srgb: false });
+    puddles.repeat.set(1, 1.5);
     const road = new THREE.Mesh(
-      this.ribbon(-ROAD_HALF, ROAD_HALF, 0.03, 14),
-      new THREE.MeshStandardMaterial({ map: asphalt, roughness: 0.85 }),
+      this.ribbon(-ROAD_HALF, ROAD_HALF, 0.02, 20),
+      new THREE.MeshStandardMaterial({ map: asphalt, roughnessMap: puddles, roughness: 0.55, metalness: 0.15 }),
     );
     road.receiveShadow = true;
     this.group.add(road);
 
-    const curbTex = canvasTexture(16, 64, (ctx, w, h) => {
-      ctx.fillStyle = '#e8322b';
-      ctx.fillRect(0, 0, w, h / 2);
-      ctx.fillStyle = '#f4f4f4';
-      ctx.fillRect(0, h / 2, w, h / 2);
-    });
-    const curbMat = new THREE.MeshStandardMaterial({ map: curbTex, roughness: 0.7 });
-    for (const [a, b] of [[ROAD_HALF, ROAD_HALF + CURB], [-ROAD_HALF - CURB, -ROAD_HALF]]) {
-      const curb = new THREE.Mesh(this.ribbon(a, b, 0.05, 4), curbMat);
-      curb.receiveShadow = true;
-      this.group.add(curb);
-    }
-
-    const gravelTex = canvasTexture(128, 128, (ctx, w, h) => {
-      ctx.fillStyle = '#c9b68a';
+    const pavement = canvasTexture(128, 128, (ctx, w, h) => {
+      ctx.fillStyle = '#3a3b42';
       ctx.fillRect(0, 0, w, h);
-      speckle(ctx, w, h, 2500, ['#b9a578', '#d8c79d', '#a8956a']);
+      speckle(ctx, w, h, 1500, ['#43444b', '#33343a']);
+      ctx.strokeStyle = '#2a2b30';
+      ctx.lineWidth = 3;
+      for (let i = 0; i <= 4; i++) {
+        ctx.beginPath();
+        ctx.moveTo(0, (i * h) / 4);
+        ctx.lineTo(w, (i * h) / 4);
+        ctx.stroke();
+      }
     });
-    const gravelMat = new THREE.MeshStandardMaterial({ map: gravelTex, roughness: 1 });
-    for (const [a, b] of [[ROAD_HALF + CURB, WALL_OFFSET], [-WALL_OFFSET, -ROAD_HALF - CURB]]) {
-      const gravel = new THREE.Mesh(this.ribbon(a, b, 0.02, 8), gravelMat);
-      gravel.receiveShadow = true;
-      this.group.add(gravel);
+    const walkMat = new THREE.MeshStandardMaterial({ map: pavement, roughness: 0.7, metalness: 0.05 });
+    for (const [a, b] of [[ROAD_HALF, WALL_OFFSET], [-WALL_OFFSET, -ROAD_HALF]]) {
+      const walk = new THREE.Mesh(this.ribbon(a, b, 0.03, 3), walkMat);
+      walk.receiveShadow = true;
+      this.group.add(walk);
     }
 
-    const tyreTex = canvasTexture(64, 64, (ctx, w, h) => {
-      ctx.fillStyle = '#d92b2b';
+    const curbTex = canvasTexture(16, 64, (ctx, w, h) => {
+      ctx.fillStyle = '#c9a227';
       ctx.fillRect(0, 0, w, h / 2);
-      ctx.fillStyle = '#f0f0f0';
+      ctx.fillStyle = '#1b1b1b';
       ctx.fillRect(0, h / 2, w, h / 2);
-      ctx.fillStyle = 'rgba(0,0,0,0.25)';
-      ctx.fillRect(0, 0, 6, h);
     });
-    const wallMat = new THREE.MeshStandardMaterial({ map: tyreTex, roughness: 0.8, side: THREE.DoubleSide });
+    const curbMat = new THREE.MeshStandardMaterial({ map: curbTex, roughness: 0.5 });
+    for (const [a, b] of [[ROAD_HALF - 0.1, ROAD_HALF + 0.4], [-ROAD_HALF - 0.4, -ROAD_HALF + 0.1]]) {
+      this.group.add(new THREE.Mesh(this.ribbon(a, b, 0.04, 2), curbMat));
+    }
+
+    // Jersey barriers with a reflective stripe.
+    const barrierTex = canvasTexture(64, 64, (ctx, w, h) => {
+      ctx.fillStyle = '#8d8e93';
+      ctx.fillRect(0, 0, w, h);
+      speckle(ctx, w, h, 300, ['#7f8085', '#9a9ba0']);
+      ctx.fillStyle = '#e0e0e0';
+      ctx.fillRect(0, h * 0.25, w, h * 0.12);
+      ctx.fillStyle = '#5b5c61';
+      ctx.fillRect(0, 0, 3, h);
+    });
+    const barrierMat = new THREE.MeshStandardMaterial({ map: barrierTex, roughness: 0.8, side: THREE.DoubleSide });
     for (const off of [WALL_OFFSET, -WALL_OFFSET]) {
-      const wall = new THREE.Mesh(this.wall(off, 1.2, 4), wallMat);
+      const wall = new THREE.Mesh(this.wall(off, 0, 1.1, 3), barrierMat);
       wall.castShadow = true;
       wall.receiveShadow = true;
       this.group.add(wall);
     }
   }
 
-  buildStartLine() {
+  buildGantry(i, text, color) {
+    const tex = canvasTexture(1024, 160, (ctx, w, h) => {
+      ctx.fillStyle = '#07070b';
+      ctx.fillRect(0, 0, w, h);
+      const s = 20;
+      for (let x = 0; x < w / s; x++) {
+        for (const y of [0, h / s - 1]) {
+          ctx.fillStyle = (x + y) % 2 ? '#111' : '#eee';
+          ctx.fillRect(x * s, y * s, s, s);
+        }
+      }
+      ctx.font = 'italic 900 96px Impact, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 24;
+      ctx.fillStyle = color;
+      ctx.fillText(text, w / 2, h / 2 + 4);
+      ctx.shadowBlur = 0;
+      ctx.fillStyle = '#ffffff';
+      ctx.globalAlpha = 0.5;
+      ctx.fillText(text, w / 2, h / 2 + 4);
+    }, { repeat: false });
+    const steel = new THREE.MeshStandardMaterial({ color: 0x1d1f26, metalness: 0.7, roughness: 0.35 });
+    const banner = new THREE.MeshBasicMaterial({ map: tex, color: new THREE.Color(1.6, 1.6, 1.6) });
+
+    const g = new THREE.Group();
+    g.position.set(this.px[i], 0, this.pz[i]);
+    g.rotation.y = this.headingAt(i);
+    for (const side of [-1, 1]) {
+      const pillar = new THREE.Mesh(new THREE.BoxGeometry(0.8, 8, 0.8), steel);
+      pillar.position.set(side * (ROAD_HALF + 1.5), 4, 0);
+      pillar.castShadow = true;
+      g.add(pillar);
+    }
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(ROAD_WIDTH + 4, 2.6, 0.5), [steel, steel, steel, steel, banner, banner]);
+    beam.position.y = 8.2;
+    g.add(beam);
+
     const checker = canvasTexture(256, 32, (ctx, w, h) => {
       const s = 16;
       for (let x = 0; x < w / s; x++) {
         for (let y = 0; y < h / s; y++) {
-          ctx.fillStyle = (x + y) % 2 ? '#111' : '#fff';
+          ctx.fillStyle = (x + y) % 2 ? '#111' : '#ddd';
           ctx.fillRect(x * s, y * s, s, s);
         }
       }
     });
-    const h = this.headingAt(0);
-    const lineGeo = new THREE.PlaneGeometry(TRACK_WIDTH, 2.2);
+    const lineGeo = new THREE.PlaneGeometry(ROAD_WIDTH, 2.4);
     lineGeo.rotateX(-Math.PI / 2);
-    const line = new THREE.Mesh(lineGeo, new THREE.MeshStandardMaterial({ map: checker, roughness: 0.8 }));
-    line.position.set(this.px[0], 0.06, this.pz[0]);
-    line.rotation.y = h;
+    const line = new THREE.Mesh(lineGeo, new THREE.MeshStandardMaterial({ map: checker, roughness: 0.5 }));
+    line.position.y = 0.05;
     line.receiveShadow = true;
-    this.group.add(line);
-
-    const banner = canvasTexture(1024, 128, (ctx, w, hh) => {
-      ctx.fillStyle = '#111';
-      ctx.fillRect(0, 0, w, hh);
-      ctx.font = 'italic 900 84px Impact, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = '#ffcc00';
-      ctx.fillText('FAST & SPURIOUS', w / 2, hh / 2 + 4);
-    });
-    banner.wrapS = banner.wrapT = THREE.ClampToEdgeWrapping;
-    const steel = new THREE.MeshStandardMaterial({ color: 0x2a2d35, metalness: 0.6, roughness: 0.4 });
-    const bannerMat = new THREE.MeshStandardMaterial({ map: banner, roughness: 0.6 });
-
-    const gantry = new THREE.Group();
-    gantry.position.set(this.px[0], 0, this.pz[0]);
-    gantry.rotation.y = h;
-    for (const side of [-1, 1]) {
-      const pillar = new THREE.Mesh(new THREE.BoxGeometry(1, 9, 1), steel);
-      pillar.position.set(side * (ROAD_HALF + 2.5), 4.5, 0);
-      pillar.castShadow = true;
-      gantry.add(pillar);
-    }
-    const beam = new THREE.Mesh(
-      new THREE.BoxGeometry(TRACK_WIDTH + 6, 2.2, 0.6),
-      [steel, steel, steel, steel, bannerMat, bannerMat],
-    );
-    beam.position.y = 9;
-    beam.castShadow = true;
-    gantry.add(beam);
-    this.group.add(gantry);
+    g.add(line);
+    this.group.add(g);
   }
 
-  buildScenery() {
-    this.buildTrees();
-    this.buildMountains();
-    this.buildBillboards();
-    this.buildDuck();
-  }
-
-  buildTrees() {
-    const count = 380;
-    const trunks = new THREE.InstancedMesh(
-      new THREE.CylinderGeometry(0.35, 0.55, 3, 6),
-      new THREE.MeshStandardMaterial({ color: 0x6b4a2f, roughness: 1 }),
-      count,
-    );
-    const leaves = new THREE.InstancedMesh(
-      new THREE.ConeGeometry(3, 7, 7),
-      new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, flatShading: true }),
-      count,
-    );
-    trunks.castShadow = leaves.castShadow = true;
-
-    const m = new THREE.Matrix4();
-    const q = new THREE.Quaternion();
-    const s = new THREE.Vector3();
-    const p = new THREE.Vector3();
-    const c = new THREE.Color();
-    let placed = 0;
-    for (let tries = 0; placed < count && tries < count * 20; tries++) {
-      const x = (Math.random() - 0.5) * 1100;
-      const z = -250 + Math.random() * 800;
-      if (this.distanceToTrack(x, z) < WALL_OFFSET + 6) continue;
-      const k = 0.7 + Math.random() * 0.9;
-      q.setFromAxisAngle(THREE.Object3D.DEFAULT_UP, Math.random() * Math.PI);
-      s.set(k, k, k);
-      trunks.setMatrixAt(placed, m.compose(p.set(x, 1.5 * k, z), q, s));
-      leaves.setMatrixAt(placed, m.compose(p.set(x, (3 + 3.5) * k, z), q, s));
-      leaves.setColorAt(placed, c.setHSL(0.27 + Math.random() * 0.08, 0.5, 0.25 + Math.random() * 0.12));
-      placed++;
-    }
-    trunks.count = leaves.count = placed;
-    this.group.add(trunks, leaves);
-  }
-
-  buildMountains() {
-    const mat = new THREE.MeshStandardMaterial({ color: 0x6f8a7a, roughness: 1, flatShading: true });
-    const snow = new THREE.MeshStandardMaterial({ color: 0xf4f7fb, roughness: 1, flatShading: true });
-    for (let i = 0; i < 28; i++) {
-      const a = (i / 28) * Math.PI * 2 + Math.random() * 0.1;
-      const r = 950 + Math.random() * 250;
-      const height = 140 + Math.random() * 200;
-      const radius = 160 + Math.random() * 120;
-      const mountain = new THREE.Mesh(new THREE.ConeGeometry(radius, height, 6 + Math.floor(Math.random() * 3)), mat);
-      mountain.position.set(Math.cos(a) * r, height / 2 - 5, 120 + Math.sin(a) * r);
-      mountain.rotation.y = Math.random() * Math.PI;
-      // Slightly fatter than the peak it sits on, so the two surfaces don't z-fight.
-      const cap = new THREE.Mesh(new THREE.ConeGeometry(radius * 0.32, height * 0.3, 6), snow);
-      cap.position.y = height * 0.35 + 1;
-      mountain.add(cap);
-      this.group.add(mountain);
-    }
-  }
-
-  buildBillboards() {
-    const post = new THREE.MeshStandardMaterial({ color: 0x555a63, metalness: 0.5, roughness: 0.5 });
-    const back = new THREE.MeshStandardMaterial({ color: 0x22252c, roughness: 0.8 });
-    BILLBOARDS.forEach((text, k) => {
-      const i = (90 + Math.round((k * SAMPLES) / BILLBOARDS.length)) % SAMPLES;
-      let side = 1;
-      let x = this.px[i] + this.nx[i] * (WALL_OFFSET + 9);
-      let z = this.pz[i] + this.nz[i] * (WALL_OFFSET + 9);
-      if (this.distanceToTrack(x, z) < WALL_OFFSET + 4) {
-        side = -1;
-        x = this.px[i] - this.nx[i] * (WALL_OFFSET + 9);
-        z = this.pz[i] - this.nz[i] * (WALL_OFFSET + 9);
+  // Road-closed barriers at both ends of the street.
+  buildEndCaps() {
+    const tex = canvasTexture(256, 64, (ctx, w, h) => {
+      for (let x = -h; x < w; x += 32) {
+        ctx.fillStyle = (x / 32) % 2 ? '#111' : '#ffcc00';
+        ctx.beginPath();
+        ctx.moveTo(x, h);
+        ctx.lineTo(x + 32, h);
+        ctx.lineTo(x + 32 + h, 0);
+        ctx.lineTo(x + h, 0);
+        ctx.fill();
       }
-      const tex = canvasTexture(1024, 256, (ctx, w, h) => {
-        const hue = (k * 53) % 360;
-        ctx.fillStyle = `hsl(${hue} 80% 52%)`;
-        ctx.fillRect(0, 0, w, h);
-        ctx.fillStyle = 'rgba(0,0,0,0.15)';
-        ctx.fillRect(0, h - 40, w, 40);
-        ctx.fillStyle = '#fff';
-        ctx.font = 'italic 900 78px Impact, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.lineWidth = 8;
-        ctx.strokeStyle = 'rgba(0,0,0,0.5)';
-        ctx.strokeText(text, w / 2, h / 2 - 10, w - 60);
-        ctx.fillText(text, w / 2, h / 2 - 10, w - 60);
-      });
-      tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-
-      const board = new THREE.Group();
-      board.position.set(x, 0, z);
-      // Face the track: local +z points back along the normal.
-      board.rotation.y = Math.atan2(-this.nx[i] * side, -this.nz[i] * side);
-      const face = new THREE.Mesh(new THREE.PlaneGeometry(16, 4), new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6 }));
-      face.position.y = 6.5;
-      face.position.z = 0.16;
-      const backing = new THREE.Mesh(new THREE.BoxGeometry(16.4, 4.4, 0.3), back);
-      backing.position.y = 6.5;
-      backing.castShadow = true;
-      board.add(face, backing);
-      for (const px of [-5, 5]) {
-        const pole = new THREE.Mesh(new THREE.BoxGeometry(0.4, 4.6, 0.4), post);
-        pole.position.set(px, 2.3, -0.2);
-        pole.castShadow = true;
-        board.add(pole);
-      }
-      this.group.add(board);
     });
-  }
-
-  // Every serious racing game needs a giant rubber duck in the infield.
-  buildDuck() {
-    const candidates = [[-140, 140], [0, 130], [200, 150], [-220, 120]];
-    const spot = candidates.find(([x, z]) => this.distanceToTrack(x, z) > 45) ?? candidates[0];
-    const yellow = new THREE.MeshStandardMaterial({ color: 0xffd60a, roughness: 0.35 });
-    const orange = new THREE.MeshStandardMaterial({ color: 0xff8c00, roughness: 0.4 });
-    const black = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.2 });
-
-    const duck = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.SphereGeometry(10, 24, 16), yellow);
-    body.scale.set(1.25, 0.85, 1.6);
-    body.position.y = 8;
-    const tail = new THREE.Mesh(new THREE.ConeGeometry(4, 8, 12), yellow);
-    tail.position.set(0, 13, -15);
-    tail.rotation.x = -0.9;
-    const head = new THREE.Mesh(new THREE.SphereGeometry(6.5, 24, 16), yellow);
-    head.position.set(0, 20, 9);
-    const beak = new THREE.Mesh(new THREE.SphereGeometry(3, 16, 8), orange);
-    beak.scale.set(1.3, 0.45, 1.4);
-    beak.position.set(0, 18.5, 15.5);
-    duck.add(body, tail, head, beak);
-    for (const side of [-1, 1]) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), black);
-      eye.position.set(side * 2.8, 22, 14.2);
-      duck.add(eye);
+    tex.repeat.set(4, 1);
+    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6, emissive: 0x222200 });
+    for (const [i, dir] of [[0, -1], [SAMPLES - 1, 1]]) {
+      const cap = new THREE.Mesh(new THREE.BoxGeometry(WALL_OFFSET * 2, 1.4, 0.8), mat);
+      cap.position.set(this.px[i] + this.tx[i] * dir * 0.5, 0.7, this.pz[i] + this.tz[i] * dir * 0.5);
+      cap.rotation.y = this.headingAt(i);
+      cap.castShadow = true;
+      this.group.add(cap);
     }
-    duck.traverse((o) => { o.castShadow = true; });
-    duck.position.set(spot[0], 0, spot[1]);
-    duck.rotation.y = Math.atan2(this.px[0] - spot[0], this.pz[0] - spot[1]); // stares at the start line
-    this.duck = duck;
-    this.group.add(duck);
   }
 }

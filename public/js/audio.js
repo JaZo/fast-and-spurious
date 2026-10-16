@@ -1,10 +1,19 @@
 // Every sound is synthesised with WebAudio, so there are no assets to load (or license).
 
-const GEARS = [0, 12, 22, 33, 45, 58, 100]; // m/s at which each gear tops out
+const storage = {
+  get(key, fallback) {
+    try { return localStorage.getItem(key) ?? fallback; } catch { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, value); } catch { /* private mode */ }
+  },
+};
 
 export class AudioFX {
   constructor() {
     this.ctx = null;
+    this.musicVolume = Number(storage.get('fs.musicVolume', '0.6'));
+    this.onReady = [];
   }
 
   // Must be called from a user gesture (browsers block autoplay).
@@ -19,10 +28,16 @@ export class AudioFX {
     this.ctx = ctx;
 
     this.master = ctx.createGain();
-    this.master.gain.value = 0.55;
+    this.master.gain.value = 0.8;
     this.master.connect(ctx.destination);
+    this.sfx = ctx.createGain();
+    this.sfx.gain.value = 0.7;
+    this.sfx.connect(this.master);
+    this.musicBus = ctx.createGain();
+    this.musicBus.gain.value = this.musicVolume;
+    this.musicBus.connect(this.master);
 
-    // Engine: two detuned oscillators through a resonant low-pass.
+    // Engine: two detuned oscillators through a resonant low-pass, plus a sub for the cannon exhaust.
     this.engFilter = ctx.createBiquadFilter();
     this.engFilter.type = 'lowpass';
     this.engFilter.Q.value = 4;
@@ -36,12 +51,20 @@ export class AudioFX {
     sub.gain.value = 0.5;
     this.osc1.connect(this.engFilter);
     this.osc2.connect(sub).connect(this.engFilter);
-    this.engFilter.connect(this.engGain).connect(this.master);
+    this.engFilter.connect(this.engGain).connect(this.sfx);
     this.osc1.start();
     this.osc2.start();
 
-    // Shared white-noise buffer for skids and thuds.
-    this.noise = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate);
+    // Turbo whistle.
+    this.whistle = ctx.createOscillator();
+    this.whistle.type = 'sine';
+    this.whistleGain = ctx.createGain();
+    this.whistleGain.gain.value = 0;
+    this.whistle.connect(this.whistleGain).connect(this.sfx);
+    this.whistle.start();
+
+    // Shared white-noise buffer for skids, thuds, purges and blow-off valves.
+    this.noise = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
     const data = this.noise.getChannelData(0);
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1;
 
@@ -54,27 +77,97 @@ export class AudioFX {
     band.Q.value = 1.2;
     this.skidGain = ctx.createGain();
     this.skidGain.gain.value = 0;
-    skid.connect(band).connect(this.skidGain).connect(this.master);
+    skid.connect(band).connect(this.skidGain).connect(this.sfx);
     skid.start();
+
+    this.car = { turbo: 1, exhaust: 1 };
+    for (const fn of this.onReady) fn(ctx);
+    this.onReady = [];
   }
 
-  engine(speed, throttle, nitro, active) {
+  whenReady(fn) {
+    if (this.ctx) fn(this.ctx);
+    else this.onReady.push(fn);
+  }
+
+  setMusicVolume(v) {
+    this.musicVolume = v;
+    storage.set('fs.musicVolume', String(v));
+    if (this.musicBus) this.musicBus.gain.setTargetAtTime(v, this.ctx.currentTime, 0.05);
+  }
+
+  configureCar({ turbo, exhaust }) {
+    this.car = { turbo, exhaust };
+  }
+
+  engine(rpm, throttle, nitro, active) {
     if (!this.ctx) return;
-    let g = 1;
-    while (g < GEARS.length - 1 && speed > GEARS[g]) g++;
-    const r = Math.min(1, Math.max(0, (speed - GEARS[g - 1]) / (GEARS[g] - GEARS[g - 1])));
-    const rpm = g === 1 ? 0.15 + r * 0.85 : 0.35 + r * 0.65;
-    const f = 42 + rpm * 120 + (nitro ? 18 : 0);
+    const cannon = this.car.exhaust === 2;
+    const f = (cannon ? 34 : 42) + rpm * (cannon ? 105 : 125) + (nitro ? 18 : 0);
     const t = this.ctx.currentTime;
     this.osc1.frequency.setTargetAtTime(f, t, 0.04);
     this.osc2.frequency.setTargetAtTime(f * 0.5, t, 0.04);
-    this.engFilter.frequency.setTargetAtTime(400 + rpm * 1400 + throttle * 700, t, 0.05);
-    this.engGain.gain.setTargetAtTime(active ? 0.07 + throttle * 0.06 : 0, t, 0.1);
+    this.engFilter.frequency.setTargetAtTime(380 + rpm * 1500 + throttle * 700, t, 0.05);
+    this.engGain.gain.setTargetAtTime(active ? (0.06 + throttle * 0.06) * (cannon ? 1.5 : 1) : 0, t, 0.1);
+    const spool = this.car.turbo > 0 && active ? throttle * Math.max(0, rpm - 0.3) : 0;
+    this.whistle.frequency.setTargetAtTime(1600 + rpm * 2600, t, 0.08);
+    this.whistleGain.gain.setTargetAtTime(spool * 0.012 * this.car.turbo, t, 0.12);
   }
 
   skid(amount) {
     if (!this.ctx) return;
-    this.skidGain.gain.setTargetAtTime(Math.min(1, amount) * 0.16, this.ctx.currentTime, 0.05);
+    this.skidGain.gain.setTargetAtTime(Math.min(1, amount) * 0.14, this.ctx.currentTime, 0.05);
+  }
+
+  noiseBurst({ dur, freq, type = 'bandpass', q = 1, vol = 0.3, at = 0, attack = 0.005, sweepTo = null }) {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const t = ctx.currentTime + at;
+    const src = ctx.createBufferSource();
+    src.buffer = this.noise;
+    const filter = ctx.createBiquadFilter();
+    filter.type = type;
+    filter.frequency.setValueAtTime(freq, t);
+    if (sweepTo) filter.frequency.exponentialRampToValueAtTime(sweepTo, t + dur);
+    filter.Q.value = q;
+    const gain = ctx.createGain();
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(vol, t + attack);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    src.connect(filter).connect(gain).connect(this.sfx);
+    src.start(t, Math.random() * 0.5);
+    src.stop(t + dur + 0.05);
+  }
+
+  // The NFSU turbo "pssssh-tu-tu-tu".
+  blowoff(strength = 1) {
+    if (!this.car.turbo) return;
+    const vol = 0.12 * strength * (0.6 + this.car.turbo * 0.25);
+    this.noiseBurst({ dur: 0.35, freq: 3200, sweepTo: 1600, q: 0.8, vol });
+    for (let k = 0; k < 3; k++) this.noiseBurst({ dur: 0.05, freq: 900, q: 3, vol: vol * 0.6, at: 0.2 + k * 0.06 });
+  }
+
+  nitroStart() {
+    this.noiseBurst({ dur: 0.6, freq: 600, sweepTo: 3000, q: 0.7, vol: 0.18, attack: 0.08 });
+  }
+
+  purge() {
+    this.noiseBurst({ dur: 1.3, freq: 5000, type: 'highpass', q: 0.5, vol: 0.22, attack: 0.03 });
+  }
+
+  click() {
+    this.tone(2400, 0.03, { vol: 0.08 });
+    this.tone(1800, 0.03, { vol: 0.08, at: 0.08 });
+  }
+
+  ring() {
+    for (let k = 0; k < 4; k++) {
+      for (let n = 0; n < 8; n++) this.tone(n % 2 ? 960 : 1180, 0.045, { vol: 0.07, at: k * 0.9 + n * 0.05, type: 'square' });
+    }
+  }
+
+  fanfare() {
+    [[523, 0], [659, 0.12], [784, 0.24], [1046, 0.4]].forEach(([f, at], i) => this.tone(f, i === 3 ? 0.7 : 0.15, { vol: 0.12, at, type: 'sawtooth' }));
   }
 
   tone(freq, dur, { type = 'square', vol = 0.2, at = 0, slideTo = null, vibrato = 0 } = {}) {
@@ -96,10 +189,10 @@ export class AudioFX {
       lfo.stop(t + dur);
     }
     gain.gain.setValueAtTime(0.0001, t);
-    gain.gain.exponentialRampToValueAtTime(vol, t + 0.015);
+    gain.gain.exponentialRampToValueAtTime(vol, t + 0.012);
     gain.gain.setValueAtTime(vol, t + dur * 0.7);
     gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-    osc.connect(gain).connect(this.master);
+    osc.connect(gain).connect(this.sfx);
     osc.start(t);
     osc.stop(t + dur + 0.02);
   }
@@ -109,20 +202,7 @@ export class AudioFX {
   }
 
   thud(intensity) {
-    if (!this.ctx) return;
-    const ctx = this.ctx;
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.value = 320;
-    const gain = ctx.createGain();
-    const t = ctx.currentTime;
-    gain.gain.setValueAtTime(Math.min(1, intensity / 25), t);
-    gain.gain.exponentialRampToValueAtTime(0.001, t + 0.3);
-    src.connect(lp).connect(gain).connect(this.master);
-    src.start(t);
-    src.stop(t + 0.32);
+    this.noiseBurst({ dur: 0.3, freq: 320, type: 'lowpass', vol: Math.min(0.9, intensity / 25) });
   }
 
   honk(kind, vol = 1) {
