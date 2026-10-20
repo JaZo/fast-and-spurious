@@ -88,6 +88,7 @@ const unlockAudio = () => {
 };
 addEventListener('pointerdown', unlockAudio, { once: true });
 addEventListener('keydown', unlockAudio, { once: true });
+document.addEventListener('visibilitychange', () => audio.setPaused(document.hidden));
 
 // ---------- game state ----------
 

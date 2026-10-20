@@ -85,6 +85,14 @@ export class AudioFX {
     this.onReady = [];
   }
 
+  // Silence everything (music and engine) while the tab is in the background. Suspending the
+  // context also freezes its clock, so the music picks up exactly where it left off.
+  setPaused(paused) {
+    if (!this.ctx) return;
+    if (paused) this.ctx.suspend();
+    else this.ctx.resume();
+  }
+
   whenReady(fn) {
     if (this.ctx) fn(this.ctx);
     else this.onReady.push(fn);
