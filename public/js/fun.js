@@ -38,6 +38,22 @@ export const NEON_SIGNS = [
   'TWO FAST TWO NAPKINS BBQ', 'PIMP MY RIDE-SHARE', 'BLOW-OFF VALVE BAR', 'NEON GENESIS CAR WASH', 'GAS GAS GAS STATION',
 ];
 
+// Green overhead signs on the freeway, two per gantry: [big line, small line].
+export const FREEWAY_SIGNS = [
+  ['SPURIOUS CITY', '↑ 3 km'], ['EXIT 13', 'NOWHERE ↗'],
+  ['LEFT LANE', 'FOR SHOWING OFF'], ['SPEED CAMERA', '(NOT REAL)'],
+  ['DOCKS', 'EXIT 7 →'], ['MOUNT SPURIOUS', 'TOFU 12 km ↑'],
+];
+
+export const BILLBOARDS = [
+  'BRAKES ARE A SUGGESTION', 'NOW 12% LESS SPURIOUS', 'DRIFT RESPONSIBLY (DON\'T)', 'INSURANCE? NEVER HEARD OF IT',
+  'HONK IF YOU LOVE DUCKS', 'YOUR AD HERE (PLEASE)', 'SPEED LIMIT: YES', 'NITROUS: IT\'S A LIFESTYLE',
+];
+
+export const DOCK_SIGNS = [
+  'SPURIOUS SHIPPING CO', 'TOTALLY LEGAL IMPORTS', "CONTAINERS 'R' US", 'NOT SMUGGLING LTD', 'FISH & SHIPS', 'PIER PRESSURE',
+];
+
 export const SPAM_CALLS = [
   ['Car Warranty Dept.', "We've been trying to reach you about your car's extended warranty."],
   ['Your Mum', 'Are you wearing a seatbelt? Call me back. Love, Mum.'],

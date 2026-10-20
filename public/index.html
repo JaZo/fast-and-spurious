@@ -101,6 +101,18 @@
         </div>
         <button id="copy-link" class="small-btn" type="button">Copy invite link</button>
       </div>
+      <div class="track-card">
+        <button id="track-prev" class="arrow" type="button" title="Previous track">◀</button>
+        <canvas id="track-preview" width="120" height="90"></canvas>
+        <div class="track-info">
+          <div id="track-name" class="track-name"></div>
+          <div id="track-diff" class="track-diff"></div>
+          <div id="track-meta" class="track-meta"></div>
+        </div>
+        <button id="track-next" class="arrow" type="button" title="Next track">▶</button>
+      </div>
+      <p id="track-blurb" class="track-blurb"></p>
+      <p id="track-host-note" class="hint">The host picks the track.</p>
       <ul id="player-list" class="player-list"></ul>
       <div class="lobby-buttons">
         <button id="lobby-garage" class="big-btn alt" type="button">🔧 GARAGE</button>

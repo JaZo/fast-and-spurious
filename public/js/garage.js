@@ -2,7 +2,7 @@
 
 import * as THREE from 'three';
 import { CarModel } from './car.js';
-import { neonTexture } from './city.js';
+import { neonTexture } from './scenery/common.js';
 import {
   PARTS, SLIDERS, VISUALS, LEVELS, BUDGET, PAINT, spent, computeTuning, statBars, saveBuild,
 } from './tuning.js';

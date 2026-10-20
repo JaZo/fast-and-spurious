@@ -7,9 +7,22 @@ A browser street racer in the spirit of Need for Speed Underground: night-time c
 ## Play
 
 - **Create a room**, then send your friends the invite link (`?room=ABCD`) from the lobby panel.
-- Everyone presses **READY**, and the race starts once all of them have. The race is a single 3.5 km sprint through Spurious City, from the START gantry to the FINISH gantry, with no laps.
+- The host picks the track in the lobby. Everyone presses **READY**, and the race starts once all of them have. Every race is a single point-to-point sprint from the START gantry to the FINISH gantry, with no laps.
 - Join a race that's already running and you drive as a ghost until the next one.
 - Tune your car in the **GARAGE** (from the menu, or from the lobby between races).
+
+## Tracks
+
+All four tracks are set at night.
+
+| Track | Difficulty | What to expect |
+| --- | --- | --- |
+| **Neon Freeway** | 🟢 Easy | 3.7 km of six-lane freeway with long sweepers, sound walls, overhead signs and a skyline. Flat out. |
+| **Downtown Sprint** | 🔵 Medium | 3.5 km of skyscrapers and neon, with a tiled tunnel and three overpasses. |
+| **Dockside Dash** | 🟠 Hard | 2.9 km through container canyons, with sharp 90° corners, gantry cranes and black water past the quay. |
+| **Mount Spurious Pass** | 🔴 Extreme | A narrow 1.8 km mountain road that climbs 118 m, with tight hairpins and guardrails. Lamps only on the corners, a torii gate, a tofu shop, and the city lights far below. |
+
+Track routes live in [public/js/tracks.js](public/js/tracks.js), and each one points at a scenery theme in `public/js/scenery/`. Roads can have elevation (the third coordinate): cars follow the slope and pitch with it, and uphill really does slow you down.
 
 ## Controls
 
@@ -85,8 +98,10 @@ public/
   js/main.js       game loop, race flow, camera
   js/net.js        PeerJS host/client transport
   js/room.js       room state machine (runs on the host)
-  js/track.js      the sprint: spline, road, sidewalks, barriers, gantries
-  js/city.js       night city: sky, streetlights, buildings, neon, tunnel, overpasses
+  js/tracks.js     track definitions: route, width, difficulty, colours of the night
+  js/track.js      a loaded road: spline with elevation, road, shoulders, barriers, gantries
+  js/world.js      builds/tears down a track plus its scenery
+  js/scenery/      common.js (sky, lamps, buildings, neon) + downtown, freeway, docks, hills
   js/car.js        arcade physics + tunable car model
   js/tuning.js     parts, sliders, visual options, build -> physics numbers
   js/garage.js     showroom + tuning menu

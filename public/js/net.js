@@ -48,7 +48,7 @@ export class Network {
     this.handlers[msg.t]?.(msg);
   }
 
-  async host(joinMsg) {
+  async host(joinMsg, trackId) {
     for (let attempt = 0; attempt < 5; attempt++) {
       const code = randomCode();
       try {
@@ -58,7 +58,7 @@ export class Network {
         throw friendly(err);
       }
       this.isHost = true;
-      this.room = new Room(code);
+      this.room = new Room(code, trackId);
       this.peer.on('connection', (conn) => this.accept(conn));
       // Losing the signalling server doesn't break existing connections, but new players need it.
       this.peer.on('disconnected', () => { if (!this.peer.destroyed) this.peer.reconnect(); });
@@ -120,7 +120,7 @@ export class Network {
 
   // Clients: true if the host has gone quiet (WebRTC can take ages to notice a dead peer).
   hostSilent(now) {
-    return !this.isHost && this.conn && now - this.lastHeard > 8000;
+    return !this.isHost && this.conn && now - this.lastHeard > 15000;
   }
 }
 

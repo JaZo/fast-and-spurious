@@ -1,9 +1,8 @@
 import * as THREE from 'three';
-import { CHECKPOINTS, TICK_RATE, TRACK_NAME } from './config.js';
-import { Track, SAMPLES } from './track.js';
-import {
-  buildCity, buildSky, nightEnvironment, SKY_HORIZON,
-} from './city.js';
+import { CHECKPOINTS, TICK_RATE } from './config.js';
+import { World } from './world.js';
+import { trackById, DEFAULT_TRACK } from './tracks.js';
+import { Sky, nightEnvironment } from './scenery/common.js';
 import {
   CarPhysics, CarModel, CAR_RADIUS, FLAG_DRIFT,
 } from './car.js';
@@ -30,8 +29,8 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.9;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(SKY_HORIZON);
-scene.fog = new THREE.Fog(SKY_HORIZON, 40, 750);
+scene.background = new THREE.Color(0x000000);
+scene.fog = new THREE.Fog(0x000000, 40, 750);
 const env = nightEnvironment(renderer);
 scene.environment = env;
 scene.environmentIntensity = 0.4;
@@ -51,11 +50,9 @@ const headlight = new THREE.SpotLight(0xfff2dd, 140, 110, 0.55, 0.55, 1.4);
 headlight.position.set(0, 0.7, 2.6); // ahead of the bumper, so it never lights our own car
 headlight.target.position.set(0, 0, 20);
 
-const track = new Track(scene);
-buildCity(scene, track);
-const sky = buildSky(scene);
+const sky = new Sky(scene);
 const particles = new Particles(scene);
-const hud = new Hud(track);
+const hud = new Hud();
 const input = new Input();
 const audio = new AudioFX();
 const music = new Music(audio);
@@ -124,6 +121,32 @@ let wrongWayTime = 0;
 let prevThrottle = 0;
 let prevNitro = false;
 let disconnected = false;
+let world = null;
+let track = null;
+let flyT = 0; // menu fly-through position along the road
+
+// Builds a track and its scenery (tearing down the previous one) and sets the mood for it.
+function loadTrack(id) {
+  const def = trackById(id);
+  if (world?.def.id === def.id) return;
+  world?.dispose();
+  world = new World(scene, def);
+  track = world.track;
+  hud.track = track;
+  sky.setColors(def.sky);
+  scene.background.set(def.sky.horizon);
+  scene.fog.color.set(def.sky.horizon);
+  [scene.fog.near, scene.fog.far] = def.fog;
+  scene.environmentIntensity = def.envIntensity ?? 0.4;
+  flyT = 0;
+  for (const r of remotes.values()) r.reset();
+  if (me.model) {
+    const mine = myInfo();
+    me.physics.place(track.gridPose((mine?.slot ?? 0) % 8));
+    snapCamera = true;
+  }
+}
+loadTrack(storage.get('fs.track', DEFAULT_TRACK));
 
 const myInfo = () => playersById.get(me.id);
 const isRacePhase = () => room.phase === 'countdown' || room.phase === 'racing';
@@ -179,7 +202,14 @@ hud.bindMenu({
   onMusicVolume: (v) => audio.setMusicVolume(v),
   onQuality: applyQuality,
 });
-hud.bindLobby({ onReady: toggleReady, onGarage: openGarage });
+hud.bindLobby({
+  onReady: toggleReady,
+  onGarage: openGarage,
+  onPickTrack: (id) => {
+    storage.set('fs.track', id);
+    net?.send({ t: 'track', id });
+  },
+});
 
 async function enterRoom(mode, details) {
   if (net) return; // already connecting or connected
@@ -198,7 +228,7 @@ async function enterRoom(mode, details) {
   });
   const joinMsg = { t: 'join', name: details.name, look: me.build.look };
   try {
-    if (mode === 'create') await net.host(joinMsg);
+    if (mode === 'create') await net.host(joinMsg, storage.get('fs.track', world.def.id));
     else await net.join(details.room, joinMsg);
   } catch (err) {
     net.peer?.destroy();
@@ -232,13 +262,17 @@ function onWelcome(msg) {
   history.replaceState(null, '', `${location.pathname}?room=${encodeURIComponent(msg.room)}`);
   hud.menuBusy(null);
   hud.showGame();
-  hud.toast(`Welcome to ${TRACK_NAME}, ${msg.name}! Room code: ${msg.room}`, 5000);
+  hud.toast(`Welcome to the underground, ${msg.name}! Room code: ${msg.room}`, 5000);
   if (net.isHost) hud.toast('You are hosting. Keep this tab open, or the room closes.', 6000);
 }
 
 function onRoom(msg) {
   const prevPhase = room.phase;
   room = msg;
+  if (msg.track !== world.def.id) {
+    net?.send({ t: 'ping' }); // building a track can take a moment; let the host know we're still here
+    loadTrack(msg.track);
+  }
   playersById = new Map(msg.players.map((p) => [p.id, p]));
   phaseEndsLocal = performance.now() + msg.phaseMs;
 
@@ -274,6 +308,7 @@ function onRoom(msg) {
     snapCamera = true;
   }
   hud.updateRoom(room, me.id, net?.isHost);
+  hud.showTrack(world.def, !!net?.isHost);
 }
 
 function onSnap(msg) {
@@ -294,6 +329,7 @@ function onHonk({ id }) {
 function onEvent(msg) {
   if (msg.kind === 'join') hud.toast(`${msg.name} ${fun.pick(fun.JOIN_QUIPS)}`);
   else if (msg.kind === 'leave') hud.toast(`${msg.name} ${fun.pick(fun.LEAVE_QUIPS)}`);
+  else if (msg.kind === 'track') hud.bigMessage(msg.name.toUpperCase(), 2000);
   else if (msg.kind === 'finish') {
     hud.toast(`🏁 ${msg.name} finished ${msg.place}${fun.ordinal(msg.place)} (${fun.formatTime(msg.time)})`, 5000);
     if (msg.id === me.id) {
@@ -312,7 +348,7 @@ function respawn() {
   const now = performance.now();
   if (me.physics.frozen || now - lastReset < 1500) return;
   lastReset = now;
-  const i = Math.max(2, Math.min(SAMPLES - 3, me.physics.trackIdx));
+  const i = Math.max(2, Math.min(track.samples - 3, me.physics.trackIdx));
   me.physics.place({ x: track.px[i], z: track.pz[i], h: track.headingAt(i), i });
   snapCamera = true;
   hud.toast(fun.pick(fun.RESET_QUIPS));
@@ -406,7 +442,6 @@ function smokeFrom(model, speed, flags, dt) {
 // ---------- camera ----------
 
 const camLook = new THREE.Vector3();
-let flyT = 0;
 
 function updateCamera(dt) {
   const p = me.physics;
@@ -422,11 +457,11 @@ function updateCamera(dt) {
   const fz = Math.cos(p.h);
   if (camMode === 0) {
     const back = 6.2 + speed * 0.025;
-    camera.position.set(p.x - Math.sin(camHeading) * back, 2.0 + speed * 0.006, p.z - Math.cos(camHeading) * back);
-    camLook.set(p.x + fx * 5, 1.0, p.z + fz * 5);
+    camera.position.set(p.x - Math.sin(camHeading) * back, p.y + 2.0 + speed * 0.006, p.z - Math.cos(camHeading) * back);
+    camLook.set(p.x + fx * 5, p.y + 1.0, p.z + fz * 5);
   } else {
-    camera.position.set(p.x + fx * 0.3, 1.3, p.z + fz * 0.3);
-    camLook.set(p.x + fx * 10, 1.1, p.z + fz * 10);
+    camera.position.set(p.x + fx * 0.3, p.y + 1.3, p.z + fz * 0.3);
+    camLook.set(p.x + fx * 10, p.y + 1.1, p.z + fz * 10);
   }
   if (p.nitroOn) {
     camera.position.x += (Math.random() - 0.5) * 0.05;
@@ -437,25 +472,25 @@ function updateCamera(dt) {
   const fov = 64 + Math.min(speed, 85) * 0.24 + (p.nitroOn ? 10 : 0);
   camera.fov += (fov - camera.fov) * Math.min(1, dt * 4);
   camera.updateProjectionMatrix();
-  followLights(p.x, p.z);
+  followLights(p.x, p.y, p.z);
 }
 
-function followLights(x, z) {
-  moon.position.set(x - 40, 120, z + 60);
-  moon.target.position.set(x, 0, z);
-  sky.position.copy(camera.position);
+function followLights(x, y, z) {
+  moon.position.set(x - 40, y + 120, z + 60);
+  moon.target.position.set(x, y, z);
+  sky.group.position.copy(camera.position);
 }
 
 // Menu backdrop: a slow fly-through down the street.
 function attractCamera(dt) {
   flyT += dt * 14;
-  const i = Math.floor(flyT / track.segLen) % (SAMPLES - 60);
+  const i = Math.floor(flyT / track.segLen) % (track.samples - 60);
   const j = i + 30;
-  camera.position.set(track.px[i] + track.nx[i] * -4, 4.5, track.pz[i] + track.nz[i] * -4);
-  camera.lookAt(track.px[j], 2, track.pz[j]);
+  camera.position.set(track.px[i] + track.nx[i] * -2, track.py[i] + 4.5, track.pz[i] + track.nz[i] * -2);
+  camera.lookAt(track.px[j], track.py[j] + 2, track.pz[j]);
   camera.fov = 62;
   camera.updateProjectionMatrix();
-  followLights(camera.position.x, camera.position.z);
+  followLights(camera.position.x, camera.position.y, camera.position.z);
 }
 
 // ---------- main loop ----------
@@ -557,7 +592,7 @@ function simulate(now, dt, inp, interactive) {
   prevThrottle = inp.throttle;
   prevNitro = p.nitroOn;
 
-  for (const r of remotes.values()) r.update(now, dt);
+  for (const r of remotes.values()) r.update(now, dt, track);
   collideWithRemotes();
   checkCheckpoints();
 
@@ -571,7 +606,9 @@ function simulate(now, dt, inp, interactive) {
 
   // Visuals.
   const flags = p.flags;
-  me.model.update({ x: p.x, z: p.z, h: p.h, speed: p.forwardSpeed, steer: p.steer, flags }, dt);
+  me.model.update({
+    x: p.x, y: p.y, z: p.z, h: p.h, pitch: p.pitch, speed: p.forwardSpeed, steer: p.steer, flags,
+  }, dt);
   me.model.setOpacity(isGhost(mine, me.finished) ? 0.45 : 1);
   smokeFrom(me.model, p.forwardSpeed, flags, dt);
   for (const r of remotes.values()) {
@@ -630,5 +667,5 @@ requestAnimationFrame(frame);
 
 // Handy for poking at the game from the dev console.
 globalThis.__fs = {
-  me, remotes, track, get room() { return room; }, get net() { return net; }, music,
+  me, remotes, get track() { return track; }, get world() { return world; }, get room() { return room; }, get net() { return net; }, music,
 };

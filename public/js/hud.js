@@ -1,7 +1,7 @@
 import {
   DRIVER_NAMES, pick, ordinal, formatTime, finishQuip,
 } from './fun.js';
-import { SAMPLES } from './track.js';
+import { TRACKS, DIFFICULTY, trackSummary } from './tracks.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -22,8 +22,8 @@ function el(tag, className, text) {
 }
 
 export class Hud {
-  constructor(track) {
-    this.track = track;
+  constructor() {
+    this.track = null;
     this.lastText = {};
     this.tacho = $('tacho').getContext('2d');
     this.map = $('minimap').getContext('2d');
@@ -103,7 +103,7 @@ export class Hud {
 
   // ---------- lobby ----------
 
-  bindLobby({ onReady, onGarage }) {
+  bindLobby({ onReady, onGarage, onPickTrack }) {
     $('ready').onclick = (e) => {
       onReady();
       e.currentTarget.blur(); // so Space doesn't re-click it while drifting
@@ -112,6 +112,13 @@ export class Hud {
       onGarage();
       e.currentTarget.blur();
     };
+    const step = (d) => (e) => {
+      const i = TRACKS.findIndex((t) => t.id === this.shownTrack);
+      onPickTrack(TRACKS[(i + d + TRACKS.length) % TRACKS.length].id);
+      e.currentTarget.blur();
+    };
+    $('track-prev').onclick = step(-1);
+    $('track-next').onclick = step(1);
     $('copy-link').onclick = async (e) => {
       const btn = e.currentTarget;
       const url = `${location.origin}${location.pathname}?room=${encodeURIComponent($('room-code').textContent)}`;
@@ -124,6 +131,53 @@ export class Hud {
       setTimeout(() => { btn.textContent = 'Copy invite link'; }, 2000);
       btn.blur();
     };
+  }
+
+  // The track card in the lobby: everyone sees it, only the host can flip through it.
+  showTrack(def, isHost) {
+    this.shownTrack = def.id;
+    const diff = DIFFICULTY[def.difficulty];
+    const { outline, length, climb } = trackSummary(def);
+    $('track-name').textContent = def.name;
+    const badge = $('track-diff');
+    badge.textContent = `${diff.label} ${'●'.repeat(def.difficulty)}${'○'.repeat(4 - def.difficulty)}`;
+    badge.style.color = diff.color;
+    badge.style.borderColor = diff.color;
+    $('track-meta').textContent = `${(length / 1000).toFixed(1)} km sprint${climb > 5 ? ` · ${Math.round(climb)} m climb` : ''}`;
+    $('track-blurb').textContent = def.blurb;
+    for (const id of ['track-prev', 'track-next']) $(id).hidden = !isHost;
+    $('track-host-note').hidden = isHost;
+
+    // Route preview, start in cyan and finish in pink.
+    const ctx = $('track-preview').getContext('2d');
+    const S = ctx.canvas.width;
+    const H = ctx.canvas.height;
+    let minX = Infinity; let maxX = -Infinity; let minZ = Infinity; let maxZ = -Infinity;
+    for (const [x, z] of outline) {
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x); minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+    }
+    const scale = Math.min((S - 16) / (maxX - minX || 1), (H - 16) / (maxZ - minZ || 1));
+    const ox = (S - (maxX - minX) * scale) / 2;
+    const oz = (H - (maxZ - minZ) * scale) / 2;
+    // Mirror x so the map matches the view from above (+x is on the left when looking down +z).
+    const pt = ([x, z]) => [S - ox - (x - minX) * scale, H - oz - (z - minZ) * scale];
+    ctx.clearRect(0, 0, S, H);
+    ctx.beginPath();
+    outline.forEach((p, k) => (k ? ctx.lineTo(...pt(p)) : ctx.moveTo(...pt(p))));
+    ctx.lineJoin = ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(56,242,255,0.3)';
+    ctx.lineWidth = 7;
+    ctx.stroke();
+    ctx.strokeStyle = diff.color;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    for (const [p, color] of [[outline[0], '#38f2ff'], [outline[outline.length - 1], '#ff2fd6']]) {
+      const [x, y] = pt(p);
+      ctx.beginPath();
+      ctx.arc(x, y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
   }
 
   updateRoom(room, myId, isHost) {
@@ -403,7 +457,7 @@ export class Hud {
 
     ctx.beginPath();
     let started = false;
-    for (let i = 0; i < SAMPLES; i += 3) {
+    for (let i = 0; i < this.track.samples; i += 3) {
       const [x, y] = toScreen(px[i], pz[i]);
       if (!started) ctx.moveTo(x, y);
       else ctx.lineTo(x, y);

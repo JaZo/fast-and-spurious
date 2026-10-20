@@ -1,13 +1,12 @@
 import * as THREE from 'three';
-import {
-  SAMPLES, ROAD_HALF, WALL_OFFSET, canvasTexture,
-} from './track.js';
+import { canvasTexture } from './track.js';
 import { NEON_COLORS } from './tuning.js';
 
 export const CAR_RADIUS = 1.6;
 const HALF_WIDTH = 1.0;
 const HALF_LENGTH = 2.3;
 const GEAR_RATIOS = [0.2, 0.36, 0.52, 0.68, 0.84, 1.0]; // fraction of top speed where each gear tops out
+const SLOPE_GRAVITY = 6.5; // m/s² per unit of grade; a bit gentler than real gravity
 
 export const FLAG_NITRO = 1;
 export const FLAG_DRIFT = 2;
@@ -22,8 +21,10 @@ export class CarPhysics {
   constructor(tuning) {
     this.T = tuning;
     this.x = 0;
+    this.y = 0;
     this.z = 0;
     this.h = 0;
+    this.pitch = 0;
     this.vx = 0;
     this.vz = 0;
     this.steer = 0;
@@ -105,6 +106,8 @@ export class CarPhysics {
       vF -= Math.sign(vF) * Math.min(Math.abs(vF), T.rolling * dt);
     }
     if (vF > top) vF -= (vF - top) * 0.8 * dt; // bleed off after nitro / onto the sidewalk
+    // Hills: uphill slows you down, downhill speeds you up.
+    if (this.trackIdx >= 0) vF -= SLOPE_GRAVITY * track.grade[this.trackIdx] * (fx * track.tx[this.trackIdx] + fz * track.tz[this.trackIdx]) * dt;
     if (this.drifting) vF -= Math.sign(vF) * 4 * dt;
 
     // Steering: needs some speed, and calms down at high speed.
@@ -161,10 +164,13 @@ export class CarPhysics {
     this.trackIdx = i;
     const lat = track.lateral(i, this.x, this.z);
     this.lateral = lat;
-    this.sidewalk = Math.abs(lat) > ROAD_HALF + 0.4;
+    this.sidewalk = Math.abs(lat) > track.roadHalf + 0.4;
+    // Elevation and pitch follow the road (physics itself stays 2D).
+    this.y = track.heightAt(i, this.x, this.z);
+    this.pitch = -Math.atan(track.grade[i] * (Math.sin(this.h) * track.tx[i] + Math.cos(this.h) * track.tz[i]));
     let impact = 0;
 
-    const limit = WALL_OFFSET - HALF_WIDTH;
+    const limit = track.wallOffset - HALF_WIDTH;
     if (Math.abs(lat) > limit) {
       const sgn = Math.sign(lat);
       const nx = track.nx[i];
@@ -183,7 +189,7 @@ export class CarPhysics {
     }
 
     // Road-closed barriers at both ends of the street.
-    for (const [end, dir] of [[0, -1], [SAMPLES - 1, 1]]) {
+    for (const [end, dir] of [[0, -1], [track.samples - 1, 1]]) {
       if (Math.abs(i - end) > 12) continue;
       const a = track.along(end, this.x, this.z) * dir; // > 0 means past the barrier
       const pen = a + HALF_LENGTH + 0.2;
@@ -425,6 +431,7 @@ export class CarModel {
       : this.mat(new THREE.MeshStandardMaterial({ color: RIM_COLORS[look.rimColor], metalness: 1, roughness: 0.22 }));
 
     this.root = new THREE.Group();
+    this.root.rotation.order = 'YXZ'; // yaw, then pitch with the road
     this.body = new THREE.Group();
     this.body.position.y = -0.025 * look.kit;
     this.root.add(this.body);
@@ -674,8 +681,9 @@ export class CarModel {
 
   // state: { x, z, h, speed, steer, flags }
   update(s, dt) {
-    this.root.position.set(s.x, 0, s.z);
+    this.root.position.set(s.x, s.y ?? 0, s.z);
     this.root.rotation.y = s.h;
+    this.root.rotation.x = s.pitch ?? 0;
 
     this.spin += (s.speed * dt) / 0.34;
     for (const w of this.wheels) w.rotation.x = this.spin;

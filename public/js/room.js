@@ -5,6 +5,7 @@ import {
   CHECKPOINTS, MAX_PLAYERS, COUNTDOWN_MS, RESULTS_MS, FINISH_GRACE_MS, IDLE_KICK_MS, HORNS, ACTIONS,
 } from './config.js';
 import { sanitizeLook } from './tuning.js';
+import { TRACKS, trackById } from './tracks.js';
 
 const FALLBACK_NAMES = ['Anonymous Hamster', 'Nameless Nugget', 'Mystery Minivan', 'Some Guy In A Car'];
 
@@ -18,8 +19,9 @@ function cleanName(raw) {
 }
 
 export class Room {
-  constructor(code) {
+  constructor(code, trackId) {
     this.code = code;
+    this.track = trackById(trackId).id;
     this.players = new Map();
     this.nextId = 1;
     this.phase = 'lobby'; // lobby -> countdown -> racing -> results -> lobby
@@ -85,6 +87,17 @@ export class Room {
         player.ready = !!msg.ready;
         this.sendRoom();
         break;
+
+      case 'track': {
+        // Only the host picks the track, and only between races.
+        if (!player.local || this.phase !== 'lobby' || !TRACKS.some((t) => t.id === msg.id) || msg.id === this.track) return;
+        this.track = msg.id;
+        for (const p of this.players.values()) p.ready = false; // new track, everyone re-confirms
+        for (const p of this.players.values()) p.state = null; // old positions belong to the old road
+        this.broadcast({ t: 'event', kind: 'track', id: msg.id, name: trackById(msg.id).name });
+        this.sendRoom();
+        break;
+      }
 
       case 'look':
         if (this.phase === 'countdown' || this.phase === 'racing') return;
@@ -171,6 +184,12 @@ export class Room {
   }
 
   tick(now) {
+    // If the host itself was frozen (e.g. building a new track), nobody else was idle during that time.
+    if (this.lastTick && now - this.lastTick > 1000) {
+      for (const p of this.players.values()) p.lastSeen += now - this.lastTick;
+    }
+    this.lastTick = now;
+
     for (const p of [...this.players.values()]) {
       if (!p.local && now - p.lastSeen > IDLE_KICK_MS) {
         this.remove(p.id);
@@ -224,6 +243,7 @@ export class Room {
     this.broadcast({
       t: 'room',
       code: this.code,
+      track: this.track,
       phase: this.phase,
       phaseMs: Math.max(0, this.phaseEndsAt - Date.now()),
       players: [...this.players.values()].map((p) => ({

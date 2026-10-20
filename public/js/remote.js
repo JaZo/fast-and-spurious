@@ -16,7 +16,9 @@ export class RemoteCar {
     this.scene = scene;
     this.buf = [];
     this.trackIdx = 0;
-    this.state = { x: 0, z: 0, h: 0, speed: 0, steer: 0, flags: 0 };
+    this.state = {
+      x: 0, y: 0, z: 0, h: 0, pitch: 0, speed: 0, steer: 0, flags: 0,
+    };
     this.visible = false;
     this.model = null;
     this.setInfo(info);
@@ -42,7 +44,7 @@ export class RemoteCar {
     this.trackIdx = i;
   }
 
-  update(now, dt) {
+  update(now, dt, track) {
     const buf = this.buf;
     if (!buf.length) return;
     const rt = now - INTERP_DELAY;
@@ -77,6 +79,11 @@ export class RemoteCar {
       st.flags = b.f;
     }
 
+    // Follow the road up and down hills.
+    const i = track.nearest(st.x, st.z, Math.min(this.trackIdx, track.samples - 1));
+    st.y = track.heightAt(i, st.x, st.z);
+    st.pitch = -Math.atan(track.grade[i] * (Math.sin(st.h) * track.tx[i] + Math.cos(st.h) * track.tz[i]));
+
     this.visible = true;
     this.model.root.visible = true;
     this.model.update(st, dt);
@@ -89,6 +96,13 @@ export class RemoteCar {
 
   get vz() {
     return Math.cos(this.state.h) * this.state.speed;
+  }
+
+  // After a track change old snapshots point at the old road.
+  reset() {
+    this.buf = [];
+    this.visible = false;
+    this.model.root.visible = false;
   }
 
   dispose() {
