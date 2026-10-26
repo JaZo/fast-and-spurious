@@ -41,6 +41,8 @@ Track routes live in [public/js/tracks.js](public/js/tracks.js), and each one po
 | Ready (lobby) | `Enter` | Start |
 | Next song / mute music | `N` / `M` | |
 
+On phones and tablets without a gamepad, on-screen controls appear automatically. Drag anywhere on the left half to steer. On the right are GAS, BRAKE, DRIFT and N₂O. Tap the 💨 🔦 📞 icons for the spurious actions; the honk, reset, camera and fullscreen buttons sit next to the minimap. Play in landscape. The invite button opens your phone's share sheet.
+
 ## Spurious actions
 
 These are mild ways to annoy the competition: they distract other drivers but never wreck them.

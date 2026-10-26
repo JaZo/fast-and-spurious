@@ -16,6 +16,11 @@ export class Input {
     this.pressed = new Set();
     this.padPrev = [];
     this.enabled = true;
+    // On-screen controls write here (see touch.js): held controls and one-shot taps.
+    this.touch = {
+      steer: 0, throttle: 0, brake: 0, handbrake: false, nitro: false,
+    };
+    this.taps = new Set();
 
     addEventListener('keydown', (e) => {
       if (isTyping(e) || !this.enabled) return;
@@ -49,6 +54,15 @@ export class Input {
     };
     this.pressed.clear();
 
+    const t = this.touch;
+    if (Math.abs(t.steer) > 0.02) out.steer = t.steer;
+    out.throttle = Math.max(out.throttle, t.throttle);
+    out.brake = Math.max(out.brake, t.brake);
+    out.handbrake ||= t.handbrake;
+    out.nitro ||= t.nitro;
+    for (const tap of this.taps) out[tap] = true;
+    this.taps.clear();
+
     const pad = [...(navigator.getGamepads?.() ?? [])].find(Boolean);
     if (pad) {
       const b = (i) => pad.buttons[i]?.value ?? 0;
@@ -65,6 +79,11 @@ export class Input {
       this.padPrev = pad.buttons.map((btn) => btn.value);
     }
     return out;
+  }
+
+  // A one-shot action from a button on screen (horn, reset, purge, ...).
+  tap(action) {
+    if (this.enabled) this.taps.add(action);
   }
 
   static neutral() {

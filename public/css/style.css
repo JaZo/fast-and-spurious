@@ -442,3 +442,179 @@ kbd {
   .now-playing { bottom: 150px; }
   .actions { bottom: 150px; left: auto; right: 16px; transform: none; flex-direction: column; }
 }
+
+/* ---------- touch controls (phones & tablets without a gamepad) ---------- */
+
+.touch-controls, .rotate-hint, .lobby-toggle { display: none; }
+
+body.touch .touch-controls { display: block; }
+body.touch #game { touch-action: none; }
+body.touch { -webkit-touch-callout: none; -webkit-user-select: none; }
+
+.touch-controls { position: fixed; inset: 0; pointer-events: none; z-index: 3; }
+
+.steer-zone {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 42vw;
+  height: 60vh;
+  pointer-events: auto;
+  touch-action: none;
+}
+.steer-pad {
+  position: absolute;
+  left: calc(110px + env(safe-area-inset-left));
+  top: 68%;
+  width: 156px;
+  height: 56px;
+  transform: translate(-50%, -50%);
+  border-radius: 28px;
+  border: 2px solid rgba(56, 242, 255, 0.35);
+  background: rgba(6, 8, 18, 0.35);
+  display: grid;
+  place-items: center;
+  transition: border-color 0.15s;
+}
+.steer-pad.active { border-color: var(--cyan); box-shadow: 0 0 18px rgba(56, 242, 255, 0.35); }
+.steer-hint { position: absolute; top: -20px; font: italic 10px var(--display); letter-spacing: 2px; opacity: 0.6; }
+.steer-knob {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 35%, #c9fbff, var(--cyan));
+  box-shadow: 0 0 14px var(--cyan);
+}
+
+.pedals {
+  position: absolute;
+  right: calc(14px + env(safe-area-inset-right));
+  bottom: calc(14px + env(safe-area-inset-bottom));
+  width: 210px;
+  height: 196px;
+}
+.pedal {
+  position: absolute;
+  pointer-events: auto;
+  touch-action: none;
+  border-radius: 50%;
+  border: 2px solid;
+  background: rgba(6, 8, 18, 0.55);
+  color: #fff;
+  font: italic 13px var(--display);
+  letter-spacing: 1px;
+  transition: transform 0.06s, box-shadow 0.06s;
+}
+.pedal.gas { right: 0; bottom: 0; width: 96px; height: 96px; border-color: var(--lime); font-size: 18px; }
+.pedal.brake { right: 106px; bottom: 0; width: 76px; height: 76px; border-color: #ff2a3a; }
+.pedal.nitro { right: 4px; bottom: 108px; width: 70px; height: 70px; border-color: var(--pink); }
+.pedal.drift { right: 92px; bottom: 90px; width: 64px; height: 64px; border-color: var(--cyan); }
+.pedal.down { transform: scale(0.92); box-shadow: 0 0 22px currentColor, inset 0 0 18px rgba(255, 255, 255, 0.25); }
+.pedal.gas.down { color: var(--lime); }
+.pedal.brake.down { color: #ff6b75; }
+.pedal.nitro.down { color: var(--pink); }
+.pedal.drift.down { color: var(--cyan); }
+
+.touch-utils {
+  position: absolute;
+  left: calc(118px + env(safe-area-inset-left));
+  top: 116px;
+  display: flex;
+  gap: 8px;
+  pointer-events: auto;
+}
+.util {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: 1px solid var(--panel-border);
+  background: rgba(6, 8, 18, 0.6);
+  color: #fff;
+  font-size: 18px;
+  touch-action: none;
+}
+
+/* Move the HUD out from under the thumbs. */
+body.touch .controls, body.touch .garage-hint { display: none; }
+body.touch .actions { bottom: calc(12px + env(safe-area-inset-bottom)); left: 50%; right: auto; transform: translateX(-50%); flex-direction: row; gap: 8px; }
+body.touch .action { width: 50px; height: 50px; }
+body.touch .action .icon { font-size: 22px; }
+body.touch .action kbd { display: none; }
+body.touch .tacho { top: 8px; bottom: auto; right: calc(8px + env(safe-area-inset-right)); width: 118px; height: 118px; }
+body.touch.in-lobby .tacho { display: none; }
+body.touch .race-info { top: 8px; left: calc(8px + env(safe-area-inset-left)); padding: 6px 12px; }
+body.touch .race-info .pos { font-size: 34px; }
+body.touch .race-info .pos sup, body.touch .race-info .pos small { font-size: 15px; }
+body.touch .race-info .timer { font-size: 15px; }
+body.touch .minimap { top: 108px; bottom: auto; left: calc(8px + env(safe-area-inset-left)); width: 100px; height: 100px; }
+body.touch .progress { display: flex; top: 12px; width: 34vw; }
+body.touch .banner { top: 40px; bottom: auto; font-size: 12px; padding: 5px 12px; }
+body.touch .toasts { top: 70px; }
+body.touch .toast { font-size: 12px; }
+body.touch .now-playing { bottom: calc(70px + env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%) scale(0.75); transform-origin: bottom center; animation: none; }
+body.touch .now-playing.out { transform: translate(-50%, 150%) scale(0.75); }
+body.touch .phone { left: 50%; bottom: auto; top: 30px; transform: translateX(-50%) scale(0.85); transform-origin: top center; }
+body.touch .countdown { font-size: 110px; }
+
+body.touch .lobby {
+  top: 8px;
+  bottom: auto;
+  right: calc(8px + env(safe-area-inset-right));
+  width: min(300px, 46vw);
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  padding: 12px;
+  z-index: 4;
+}
+body.touch .lobby-toggle { display: inline-block; }
+body.touch .room-code { font-size: 22px; }
+body.touch .lobby-head { flex-wrap: nowrap; }
+body.touch .lobby-head .label { white-space: nowrap; font-size: 10px; }
+body.touch .lobby-head .small-btn { padding: 6px 8px; white-space: nowrap; }
+body.touch .badge { font-size: 9px; }
+.lobby.collapsed .track-card, .lobby.collapsed .track-blurb, .lobby.collapsed #track-host-note,
+.lobby.collapsed .player-list, .lobby.collapsed .hint { display: none !important; }
+.lobby.collapsed .lobby-toggle { transform: rotate(-90deg); }
+.lobby.collapsed .lobby-buttons { margin-top: 10px; }
+
+@media (orientation: portrait) {
+  body.touch #hud:not([hidden]) ~ .rotate-hint {
+    display: grid;
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    place-content: center;
+    gap: 12px;
+    padding: 24px;
+    text-align: center;
+    background: rgba(5, 5, 10, 0.92);
+    font: italic 20px var(--display);
+  }
+  .rotate-hint span { font-size: 64px; font-style: normal; animation: tilt 1.6s ease-in-out infinite; }
+}
+@keyframes tilt { 50% { transform: rotate(-90deg); } }
+
+/* Landscape phones (and any short screen): a more compact menu. */
+@media (max-height: 520px) {
+  .menu-card { padding: 16px 20px; }
+  .logo { font-size: 30px; }
+  h2 { font-size: 26px; }
+  .tagline { margin: 4px 0 10px; font-size: 12px; }
+  .field { margin-bottom: 8px; }
+  .field > span { margin-bottom: 3px; }
+  input { padding: 8px 12px; font-size: 15px; }
+  .big-btn { padding: 9px; font-size: 16px; margin-top: 6px; }
+  .settings { margin-top: 10px; padding-top: 10px; }
+  .garage-panel { top: 8px; bottom: 8px; left: 8px; padding: 12px; }
+  .garage-panel h2 { display: none; }
+  .tabs { margin-top: 0; }
+  .stats { gap: 3px; }
+  .garage-row { padding: 5px 8px; }
+}
+
+/* With the lobby panel open on the right, centre messages in the space that's left. */
+body.touch.in-lobby .banner, body.touch.in-lobby .toasts {
+  left: calc((100vw - min(300px, 46vw) - 16px) / 2);
+  max-width: calc(100vw - min(300px, 46vw) - 32px);
+}
+body.touch .banner { white-space: normal; }

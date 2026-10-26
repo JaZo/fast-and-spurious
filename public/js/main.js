@@ -8,6 +8,7 @@ import {
 } from './car.js';
 import { RemoteCar } from './remote.js';
 import { Input } from './input.js';
+import { TouchControls } from './touch.js';
 import { Network } from './net.js';
 import { Hud, storage } from './hud.js';
 import { AudioFX } from './audio.js';
@@ -54,6 +55,7 @@ const sky = new Sky(scene);
 const particles = new Particles(scene);
 const hud = new Hud();
 const input = new Input();
+new TouchControls(input, { onFullscreen: toggleFullscreen });
 const audio = new AudioFX();
 const music = new Music(audio);
 const post = new Post(renderer);
@@ -203,6 +205,19 @@ hud.bindMenu({
   onMusicVolume: (v) => audio.setMusicVolume(v),
   onQuality: applyQuality,
 });
+hud.onAction = (kind) => input.tap(kind);
+
+// Fullscreen + landscape lock where the browser allows it (Android; iPhones ignore both).
+function toggleFullscreen() {
+  if (document.fullscreenElement) {
+    document.exitFullscreen?.();
+    return;
+  }
+  document.documentElement.requestFullscreen?.({ navigationUI: 'hide' })
+    .then(() => screen.orientation?.lock?.('landscape'))
+    .catch(() => {});
+}
+
 hud.bindLobby({
   onReady: toggleReady,
   onGarage: openGarage,

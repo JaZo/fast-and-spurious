@@ -119,17 +119,29 @@ export class Hud {
     };
     $('track-prev').onclick = step(-1);
     $('track-next').onclick = step(1);
+    // On small screens the lobby panel folds down to the essentials.
+    $('lobby-toggle').onclick = (e) => {
+      $('lobby').classList.toggle('collapsed');
+      e.currentTarget.blur();
+    };
     $('copy-link').onclick = async (e) => {
       const btn = e.currentTarget;
-      const url = `${location.origin}${location.pathname}?room=${encodeURIComponent($('room-code').textContent)}`;
+      const code = $('room-code').textContent;
+      const url = `${location.origin}${location.pathname}?room=${encodeURIComponent(code)}`;
+      btn.blur();
+      // Phones get the native share sheet; everyone else gets the clipboard.
+      if (document.body.classList.contains('touch') && navigator.share) {
+        navigator.share({ title: 'Fast & Spurious', text: `Race me in room ${code}!`, url }).catch(() => {});
+        return;
+      }
+      const label = btn.textContent;
       try {
         await navigator.clipboard.writeText(url);
         btn.textContent = 'Copied!';
       } catch {
         btn.textContent = url;
       }
-      setTimeout(() => { btn.textContent = 'Copy invite link'; }, 2000);
-      btn.blur();
+      setTimeout(() => { btn.textContent = label; }, 2000);
     };
   }
 
@@ -184,6 +196,7 @@ export class Hud {
     $('room-code').textContent = room.code;
     $('host-badge').hidden = !isHost;
     $('lobby').hidden = room.phase !== 'lobby';
+    document.body.classList.toggle('in-lobby', room.phase === 'lobby');
 
     $('player-list').replaceChildren(...room.players.map((p) => {
       const li = el('li', p.id === myId ? 'me' : '');
@@ -309,9 +322,15 @@ export class Hud {
     const box = $('actions');
     if (box.children.length !== actions.length) {
       box.replaceChildren(...actions.map((a) => {
-        const slot = el('div', 'action');
-        slot.title = a.name;
+        // Tappable too: that's how touch players (and mouse fans) fire them.
+        const slot = el('button', 'action');
+        slot.type = 'button';
+        slot.title = `${a.name} (${a.key})`;
         slot.append(el('span', 'icon', a.icon), el('kbd', '', a.key), el('div', 'fill'));
+        slot.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          this.onAction?.(a.kind);
+        });
         return slot;
       }));
     }
